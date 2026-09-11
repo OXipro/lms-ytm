@@ -842,7 +842,7 @@ _AUDIO_CODEC, _AUDIO_FORMAT, _AUDIO_MIME = _detect_audio_codec()
 PREFETCH_DIR = os.path.join(tempfile.gettempdir(), "ytmproxy_prefetch")
 _prefetch_started = set()
 _prefetch_lock = threading.Lock()
-_prefetch_semaphore = threading.Semaphore(1)  # Max 1 concurrent prefetch download (Node JS challenge is CPU-intensive on ARM)
+_prefetch_semaphore = threading.Semaphore(2)  # Max 2 concurrent prefetch downloads
 
 def _prefetch_paths(video_id):
     os.makedirs(PREFETCH_DIR, exist_ok=True)
@@ -2019,7 +2019,7 @@ class _Handler(BaseHTTPRequestHandler):
                     return
                 # Wait for first bytes — timeout only applies to this initial wait
                 # not to the stream itself (a long song should stream indefinitely)
-                first_byte_deadline = time.time() + 20
+                first_byte_deadline = time.time() + 60
                 while time.time() < first_byte_deadline:
                     if os.path.exists(done_path):
                         break

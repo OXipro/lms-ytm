@@ -422,6 +422,22 @@ sub getMetadataFor {
 
     my $cached = $_metadata_cache{$vid};
 
+    # If no cache entry, trigger a background fetch
+    unless ($cached) {
+        Plugins::YouTubeMusic::API->getSongInfo($vid, sub {
+            my $info = shift;
+            return unless $info && ref $info eq 'HASH';
+            $_metadata_cache{$vid} = {
+                title    => $info->{title}     || '',
+                artist   => $info->{artist}    || '',
+                album    => $info->{album}     || '',
+                duration => $info->{duration}  || 0,
+                cover    => $info->{thumbnail} || '',
+            };
+            Slim::Control::Request::notifyFromArray(undef, ['newmetadata']);
+        });
+    }
+
     my %meta  = (
         title   => ($cached && $cached->{title})  ? $cached->{title}  : "YouTube Music - $vid",
         artist  => ($cached && $cached->{artist}) ? $cached->{artist} : '',
