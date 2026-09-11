@@ -2019,7 +2019,7 @@ class _Handler(BaseHTTPRequestHandler):
                     return
                 # Wait for first bytes — timeout only applies to this initial wait
                 # not to the stream itself (a long song should stream indefinitely)
-                first_byte_deadline = time.time() + 60
+                first_byte_deadline = time.time() + 20
                 while time.time() < first_byte_deadline:
                     if os.path.exists(done_path):
                         break

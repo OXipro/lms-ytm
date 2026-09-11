@@ -4,14 +4,14 @@
     <title lang="EN">YouTube Music for LMS</title>
   </details>
   <plugins>
-    <plugin name="YouTubeMusic" version="1.3.96" minTarget="9.0" maxTarget="*">
+    <plugin name="YouTubeMusic" version="1.3.97" minTarget="9.0" maxTarget="*">
       <title lang="EN">YouTube Music</title>
       <desc lang="EN">Browse, search, and stream YouTube Music to your Squeezebox players.</desc>
-      <changes lang="EN">Fix autoplay/radio not triggering after playlist ends. Radio now starts 2 tracks before the end of the queue instead of waiting until the very last track, giving it time to add new tracks before playback stops.</changes>
+      <changes lang="EN">Fix skipping forward playing silent track for up to 60 seconds. Reduced stream timeout from 60s to 20s so unprefetched tracks skip quickly instead of playing silence.</changes>
       <creator>schmij97</creator>
       <category>musicservices</category>
-      <url>https://github.com/schmij97/lms-ytmusic/releases/download/v1.3.96/YouTubeMusic-1.3.96.zip</url>
-      <sha>f85f5e18903e039c854d87a1efff3e6685c8de87</sha>
+      <url>https://github.com/schmij97/lms-ytmusic/releases/download/v1.3.97/YouTubeMusic-1.3.97.zip</url>
+      <sha>fbe0413110fa67b5c8014309d99d824bcd248fe3</sha>
     </plugin>
   </plugins>
 </extensions>
