@@ -7,7 +7,7 @@
     <plugin name="YouTubeMusic" version="1.3.97" minTarget="9.0" maxTarget="*">
       <title lang="EN">YouTube Music</title>
       <desc lang="EN">Browse, search, and stream YouTube Music to your Squeezebox players.</desc>
-      <changes lang="EN">Fix skipping forward playing silent track for up to 60 seconds. Reduced stream timeout from 60s to 20s so unprefetched tracks skip quickly instead of playing silence.</changes>
+      <changes lang="EN">Fix skipping forward causing silent playback for up to 60 seconds. Reduced stream timeout from 60s to 20s so unprefetched tracks skip quickly instead of playing silence.</changes>
       <creator>schmij97</creator>
       <category>musicservices</category>
       <url>https://github.com/schmij97/lms-ytmusic/releases/download/v1.3.97/YouTubeMusic-1.3.97.zip</url>
