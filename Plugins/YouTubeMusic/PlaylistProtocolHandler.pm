@@ -67,7 +67,7 @@ sub explodePlaylist {
 
         $log->info("Exploded playlist $browse_id into " . scalar(@urls) . " tracks");
         $callback->(\@urls);
-    });
+    }, $client);
 }
 
 1;

@@ -184,11 +184,10 @@ sub getNextTrack {
 
 
     my $port       = $prefs->get('proxy_port') || 9876;
-    # Use the real LMS server address rather than 127.0.0.1 so that
-    # players on separate machines can fetch the stream directly when
-    # LMS decides to use direct streaming instead of proxying.
     my $server_ip  = Slim::Utils::Network::serverAddr() || '127.0.0.1';
-    my $streamUrl  = "http://$server_ip:$port/stream/$vid";
+    my $player     = eval { $song->master() };
+    my $query      = Plugins::YouTubeMusic::API->streamQuery($player);
+    my $streamUrl  = "http://$server_ip:$port/stream/$vid$query";
 
     # If autoplay is disabled, ensure repeat is off so player stops after queue ends
     unless ($prefs->get('autoplay') // 1) {
@@ -202,7 +201,7 @@ sub getNextTrack {
     _fetch_metadata($vid, $song);
     # Start downloading current track NOW before LMS opens the stream
     $log->info("EARLY PREFETCH START $vid");
-    Plugins::YouTubeMusic::API->prefetch($vid, sub {});
+    Plugins::YouTubeMusic::API->prefetch($vid, sub {}, $player);
 
 
     # Only trigger prefetch chain for the first track — subsequent tracks
@@ -236,7 +235,7 @@ sub _prefetch_with_client {
     my ($next_vid) = $next_url =~ m{^ytm://([A-Za-z0-9_\-]+)};
     return unless $next_vid;
     $log->info("Prefetching next track: $next_vid");
-    Plugins::YouTubeMusic::API->prefetch($next_vid, sub {});
+    Plugins::YouTubeMusic::API->prefetch($next_vid, sub {}, $client);
     # Also prefetch 2 tracks ahead for smoother progressive serving
     my $next2_index = $next_index + 1;
     if ($next2_index < $count) {
@@ -246,7 +245,7 @@ sub _prefetch_with_client {
             my ($next2_vid) = $next2_url =~ m{^ytm://([A-Za-z0-9_\-]+)};
             if ($next2_vid) {
                 $log->info("Prefetching 2 ahead: $next2_vid");
-                Plugins::YouTubeMusic::API->prefetch($next2_vid, sub {});
+                Plugins::YouTubeMusic::API->prefetch($next2_vid, sub {}, $client);
             }
         }
     }
@@ -293,7 +292,7 @@ sub _prefetch_next_track {
         if ($result && ref $result eq 'HASH') {
             $log->debug("Prefetch status for $next_vid: " . ($result->{status} // 'unknown'));
         }
-    });
+    }, $client);
 }
 
 # ── Metadata ──────────────────────────────────────────────────────────────────
@@ -383,7 +382,7 @@ sub _start_radio {
             $client, Time::HiRes::time() + 300,
             sub { delete $_radio_active{$client_id}; }
         );
-    });
+    }, $client);
 }
 
 sub _fetch_metadata {
