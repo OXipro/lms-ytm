@@ -1,6 +1,41 @@
 [% pagetitle = 'PLUGIN_YOUTUBEMUSIC_SETTINGS' %]
 [% PROCESS settings/header.html %]
 
+  [% WRAPPER setting title="YouTube Music account" desc="A free YouTube Music login is enough for Home, library, history, and moods. Playback does not use that login unless you enable the cookie switch below. Authentication follows ytmusicapi: paste the request headers of a logged-in POST to music.youtube.com/youtubei/v1/browse (Firefox: copy request headers; Chrome: copy the cookie, x-goog-authuser, and authorization lines), or paste a Netscape cookies.txt exported while logged in to music.youtube.com. The cookie must contain __Secure-3PAPISID. If you use more than one Google account in the same browser, set Auth user to the X-Goog-AuthUser index (usually 0). Credentials stay on this server, mode 0600, and are not written to the plugin log. OAuth device-login does not unlock library playback here." %]
+    [% IF accountImportStatus %]
+      <p><strong>[% accountImportStatus | html %]</strong></p>
+    [% END %]
+    <p>
+      Default account
+      <select name="pref_activeAccount">
+        <option value="" [% IF !activeAccount %]selected[% END %]>Anonymous (no account)</option>
+        [% FOREACH account IN accountList %]
+          <option value="[% account.id | html %]" [% IF activeAccount == account.id %]selected[% END %]>[% account.name | html %][% IF account.channel %] ([% account.channel | html %])[% END %]</option>
+        [% END %]
+      </select>
+    </p>
+    <p>
+      Remove account
+      <select name="pref_deleteAccount">
+        <option value="">Do not remove</option>
+        [% FOREACH account IN accountList %]
+          <option value="[% account.id | html %]">[% account.name | html %]</option>
+        [% END %]
+      </select>
+    </p>
+    <p>
+      <input type="text" name="pref_accountName" placeholder="Account name" style="width:220px;" />
+      Auth user
+      <input type="text" name="pref_accountAuthUser" value="0" style="width:3em;" />
+    </p>
+    <textarea name="pref_accountMaterial" rows="6" style="width:100%;font-family:monospace;" placeholder="Paste browser headers or Netscape cookies.txt. Leave empty to keep existing accounts."></textarea>
+  [% END %]
+
+  [% WRAPPER setting title="Share cookies with yt-dlp" desc="Off by default. When off, streams are resolved like a logged-out client: free catalog audio, lower bitrate, and some premium-only tracks will fail. When on, the Netscape cookie file saved with the account is passed to yt-dlp for that player's account. That is a full Google session cookie. Enable it only if you want Premium audio quality and you accept that yt-dlp will see the cookie. A headers-only paste has no Netscape file, so this switch does nothing until you import cookies.txt." %]
+    <input type="checkbox" name="pref_shareCookiesWithYtdlp" id="pref_shareCookiesWithYtdlp" value="1" [% IF shareCookiesWithYtdlp %]checked[% END %] />
+    <label for="pref_shareCookiesWithYtdlp">Pass this account's cookies.txt to yt-dlp</label>
+  [% END %]
+
   [% WRAPPER setting title="yt-dlp" desc="Download or update yt-dlp. yt-dlp is used to resolve YouTube stream URLs and must be kept up to date as YouTube changes its systems. Use 'Download' for first-time setup (no sudo required) or 'Update' to upgrade an existing install." %]
     <span id="ytdlpInstalled" style="margin-right:10px;font-weight:bold;"></span>
     <button type="button" id="ytdlpDownloadBtn" onclick="downloadYtDlp()">Download yt-dlp</button>

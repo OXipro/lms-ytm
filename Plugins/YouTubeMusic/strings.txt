@@ -66,3 +66,51 @@ PLUGIN_YOUTUBEMUSIC_MOODS
 
 PLUGIN_YOUTUBEMUSIC_PODCASTS
 	EN	Podcasts
+
+PLUGIN_YOUTUBEMUSIC_LIBRARY
+	EN	Library
+
+PLUGIN_YOUTUBEMUSIC_HISTORY
+	EN	History
+
+PLUGIN_YOUTUBEMUSIC_LIKED
+	EN	Liked songs
+
+PLUGIN_YOUTUBEMUSIC_SUBSCRIPTIONS
+	EN	Subscriptions
+
+PLUGIN_YOUTUBEMUSIC_ACTIVE_ACCOUNT
+	EN	Account: %s
+
+PLUGIN_YOUTUBEMUSIC_ACCOUNT_ANON
+	EN	No account (anonymous)
+
+PLUGIN_YOUTUBEMUSIC_ACCOUNT_SWITCHED
+	EN	Using %s on this player
+
+PLUGIN_YOUTUBEMUSIC_ACCOUNT_REQUIRED
+	EN	Sign in on this player to open this menu
+
+PLUGIN_YOUTUBEMUSIC_PLAYER_SETTINGS
+	EN	YouTube Music
+
+PLUGIN_YOUTUBEMUSIC_PLAYER_ACCOUNT
+	EN	Account for this player
+
+PLUGIN_YOUTUBEMUSIC_PLAYER_ACCOUNT_DESC
+	EN	Each player can use a different YouTube Music account. Leave this on the server default to follow Settings. Anonymous playback still works with no account.
+
+PLUGIN_YOUTUBEMUSIC_PLAYER_ACCOUNT_DEFAULT
+	EN	Server default
+
+PLUGIN_YOUTUBEMUSIC_STREAM_FORMAT
+	EN	Stream format
+
+PLUGIN_YOUTUBEMUSIC_STREAM_FORMAT_DESC
+	EN	YouTube audio is transcoded on the server before it reaches the player. MP3 plays on Radio, Boom, and Classic. FLAC is for players that decode it. AAC is the fallback when MP3 encoding is missing. Auto uses the server codec.
+
+PLUGIN_YOUTUBEMUSIC_BITRATE
+	EN	Bitrate
+
+PLUGIN_YOUTUBEMUSIC_BITRATE_DESC
+	EN	Used for MP3 and AAC. FLAC ignores this. 192 kbps is the safe default for hardware players. 320 kbps needs a faster server.
