@@ -1,254 +1,60 @@
-# YouTube Music for Lyrion Music Server (LMS)
+# YouTube Music for Lyrion Music Server
 
-Browse, search, and stream YouTube Music to your Squeezebox players through
-Lyrion Music Server (formerly Logitech Media Server).
+Fork of [schmij97/lms-ytmusic](https://github.com/schmij97/lms-ytmusic) (GPL-2.0). The Perl plugin and the local Python proxy are kept. Account feeds go through [ytmusicapi](https://github.com/sigma67/ytmusicapi). Audio is still `yt-dlp` piped into `ffmpeg`, the same path the original plugin uses for Squeezebox hardware.
 
-## Disclaimer
+This project is not affiliated with Google or YouTube. It calls the unofficial YouTube Music InnerTube API. That API changes without notice.
 
-This is an independent, unofficial project. It is not affiliated with,
-endorsed by, or sponsored by Google LLC or YouTube. "YouTube" and
-"YouTube Music" are trademarks of Google LLC, referenced here only to
-describe the service this tool interacts with.
+## What a free account does
 
-This plugin works by calling YouTube Music's internal (InnerTube) web API,
-which is undocumented and not intended for third-party use. It may stop
-working at any time if Google changes that API, and its continued
-functionality is not guaranteed. Use it at your own risk, and in
-accordance with YouTube's Terms of Service.
+Browsing works with no account at all: search, home, charts, new releases, moods and genres, podcasts.
 
-> This plugin uses YouTube Music's unofficial InnerTube API. It may stop
-> working if Google changes that API without notice. See
-> [If the API changes](#if-the-api-changes) below for how to fix it.
+A normal (free) YouTube Music login adds, for the player that selects it:
 
-## Features
+- personalised Home
+- library (playlists, liked songs, albums, artists, subscriptions)
+- history
+- moods and genres split into the sections YouTube returns, including "For you" when the account has one
 
-- Browse Home, Charts & Trending, New Releases, Moods & Genres, Podcasts
-- Search (Songs, Albums, Artists, Playlists)
-- My Playlists — save favourite playlists so they always appear in the menu
-- Play individual songs or explode a full playlist/album into your queue
-- Background prefetching of the next track so transitions are near-instant
-- Works on real Squeezebox hardware (tested on Squeezebox Radio) and
-  software players (squeezeslave)
-- Correct title, artist, and artwork metadata
-- Compatible with philippe44's LMS-YouTube plugin — existing `youtube://` 
-  Favorites continue to work if switching from that plugin to this one
+Playback does not receive that login unless you opt in. The setting **Share cookies with yt-dlp** is off by default. Leave it off for free-account listening. Turn it on only when you want Premium audio quality and you have imported a Netscape `cookies.txt`. That file is a Google session cookie. yt-dlp will see it. A headers-only paste is enough for the catalogue and is not sent to yt-dlp.
 
-> **Note:** When searching for podcasts, individual episodes appear under
-> the **Songs** category. This is expected — they play correctly as audio
-> tracks. To browse full podcast shows, use the **Podcasts** menu section.
+## Authentication
+
+ytmusicapi documents two setups. OAuth (TV / limited-input device client) is the simplest for some scripts, and it does not provide a cookie yt-dlp can use, so this plugin does not use it.
+
+Use browser auth, as described in the [ytmusicapi browser setup](https://ytmusicapi.readthedocs.io/en/stable/setup/browser.html):
+
+1. Open https://music.youtube.com and sign in.
+2. In the browser developer tools, Network tab, filter for `browse`.
+3. Copy the request headers of a logged-in POST (Firefox: copy request headers). The paste must include `cookie` and `x-goog-authuser`.
+4. Or export a Netscape `cookies.txt` for `music.youtube.com` while logged in. It must contain `__Secure-3PAPISID`.
+
+In LMS: Settings, Advanced, YouTube Music. Name the account, set Auth user (the `X-Goog-AuthUser` index, usually `0`; required when several Google accounts share one browser), paste, save. Files are stored under the LMS prefs directory `plugin/youtubemusic/`, mode `0600`. They are not written to the log.
+
+Each player picks an account under player settings, or from the account row inside the app when more than one account exists. "No account" on a player forces anonymous browsing even if the server has a default.
+
+## Audio
+
+The proxy transcodes to a sequential stream because raw YouTube files do not start reliably on Radio, Boom, or Touch. Per player:
+
+- format: Auto (server codec), MP3, FLAC, or AAC
+- bitrate: 192 or 320 kbps for MP3 and AAC
+
+MP3 192 is the default that hardware players accept. FLAC is for players that decode it. If ffmpeg has no `libmp3lame` (piCorePlayer's `pcp-ffmpeg` extension), the proxy still falls back to FLAC or AAC.
+
+Menu icons are the stock LMS files under `/html/images/`. Cover art on tracks and albums still comes from YouTube.
 
 ## Requirements
 
-- Lyrion Music Server 9.0+
-- Python 3.9+
-- [yt-dlp](https://github.com/yt-dlp/yt-dlp)
+- Lyrion Music Server 9
+- Python 3.10+
 - ffmpeg
-- `libio-socket-ssl-perl` (Perl SSL support)
+- yt-dlp (the settings page can download it)
+- `ytmusicapi` (`pip install -r requirements.txt` for the same Python LMS launches). The proxy tries a user install on startup if the import fails.
 
-On Raspberry Pi OS / Debian:
+## Install
 
-```bash
-sudo apt install -y python3 python3-pip ffmpeg libio-socket-ssl-perl libnet-ssleay-perl
-sudo pip3 install yt-dlp --break-system-packages
-```
-### piCorePlayer notes
-
-- Install `pcp-ffmpeg.tcz` from the pCP extension manager — **not** `ffmpeg.tcz` which does not work on pCP at all
-- `pcp-ffmpeg.tcz` lacks libmp3lame (MP3 encoding support), so the plugin automatically falls back to FLAC
-- yt-dlp must be installed via the **Download yt-dlp** button in Settings → Advanced → YouTube Music (persists in LMS cache across reboots)
-
-> **Tip:** Once installed, you can update yt-dlp at any time from **Settings → Advanced → YouTube Music → Update yt-dlp** without needing command line access.
-
-
-### Pasting YouTube Music URLs
-
-You can paste YouTube Music URLs directly into LMS to play tracks or full albums:
-
-**Single track** — copy the URL from the YouTube Music browser address bar while a song is playing:
-`https://music.youtube.com/watch?v=dQw4w9WgXcQ`
-
-**Album or playlist** — copy the URL from the YouTube Music browser address bar while viewing an album:
-`https://music.youtube.com/playlist?list=OLAK5uy_...`
-
-To use: go to **Settings → Advanced → YouTube Music**, paste the URL, browse to it and play. Or use the **Add URL to playlist** feature in LMS directly. Full metadata (title, artist, duration, artwork) is retrieved automatically — no authentication required.
-
-### Windows notes
-
-Getting Python detected correctly by LMS on Windows requires installing Python system-wide rather than per-user. When running the Python installer:
-
-1. On the first screen, tick **"Add Python to PATH"** and click **"Customize installation"**
-2. On the next screen, select **"py launcher"** and **"for all users"**, then click Next
-3. On the advanced options screen, select **"Install Python for all users"** — this installs to `C:\Program Files\Python3xx` instead of the per-user AppData folder, which LMS can reliably detect. Also ensure **"Add Python to environment variables"** is checked
-
-After installation, verify in a CMD terminal (Run as Administrator) that both `py.exe --version` and `python.exe --version` return the same Python version. Then restart LMS and use the **Download yt-dlp** button in **Settings → Advanced → YouTube Music**.
-
-> **Note:** If the Download button shows a "Failed to fetch" error, manually download `yt-dlp.exe` from the [yt-dlp releases page](https://github.com/yt-dlp/yt-dlp/releases) and place it in `C:\ProgramData\Lyrion\Cache\InstalledPlugins\Plugins\YouTubeMusic\Bin\`
-
-### Ubuntu/Debian notes
-
-The `apt` version of yt-dlp is severely outdated (2022). Use pipx instead:
-
-sudo apt install pipx
-pipx install yt-dlp
-
-
-To update later: `pipx upgrade yt-dlp`
-
-The update button in **Settings → Advanced → YouTube Music** also supports pipx installs.
-
-## Quick Setup (no command line needed)
-
-Once the plugin is installed via the repo URL below, go to **Settings → Advanced → YouTube Music** and click **Download yt-dlp**. This automatically downloads the correct yt-dlp binary for your platform directly into the plugin directory — no sudo required, no PATH issues.
-
-Use the **Update yt-dlp** button in the same location to keep it current as YouTube changes its systems.
-
-## Installation (recommended)
-
-1. Make sure the requirements above are installed.
-2. In the LMS web interface, go to **Settings → Manage Plugins**.
-3. Scroll to the bottom to **Additional Repositories** and paste:
-https://raw.githubusercontent.com/schmij97/lms-ytmusic/main/repo.xml
-
-4. Click **Apply**.
-5. Refresh the page. A new section, **"YouTube Music for LMS,"** appears
-   with the plugin listed. Check the box next to **YouTube Music** and
-   click **Apply** again.
-6. Restart LMS when prompted.
-7. **YouTube Music** will now appear under **My Apps** in your LMS menu.
-
-## Manual installation (fallback)
-
-If you can't use the repository method, download the latest release ZIP
-from the [Releases page](https://github.com/schmij97/lms-ytmusic/releases)
-and extract it directly into your LMS plugins directory:
-
-```bash
-unzip YouTubeMusic-X.Y.Z.zip
-sudo cp -r Plugins/YouTubeMusic /var/lib/squeezeboxserver/cache/InstalledPlugins/Plugins/
-sudo chown -R squeezeboxserver /var/lib/squeezeboxserver/cache/InstalledPlugins/Plugins/YouTubeMusic
-sudo systemctl restart logitechmediaserver
-```
-
-If the plugin doesn't appear after restarting, you may need to manually
-enable it:
-
-```bash
-sudo nano /var/lib/squeezeboxserver/prefs/plugin/state.prefs
-```
-
-Add a line `YouTubeMusic: enabled` right after the `---` at the top, save,
-and restart LMS again.
-
-## Configuration
-
-In LMS, go to **Settings → Advanced → YouTube Music** to configure the plugin.
-
-### Path Overrides
-The settings page shows auto-discovered paths for Python, yt-dlp, ffmpeg, and Node.js under **Discovered Paths**. If a binary isn't being found automatically (common on Windows when LMS runs as a service), you can specify exact paths in the **Path Overrides** section.
-
-> **Note:** The red "Path not found" warning next to an override field requires the proxy to be running. If the proxy isn't starting due to a bad path, enter the correct path, save, and restart LMS — the warning will appear on the next page load once the proxy is running.
-
-### Proxy Port
-Change the local proxy port (default `9876`) if it conflicts with something else on your system.
-
-## My Playlists
-
-You can save YouTube Music playlists so they always appear in the **My Playlists** menu.
-
-**To add a playlist using the URL helper (easiest):**
-1. Open [music.youtube.com](https://music.youtube.com) in a browser
-2. Navigate to the playlist you want to add
-3. Copy the URL from the address bar
-4. In LMS **Settings → Advanced → YouTube Music**, paste the URL into the **Add from URL** field and click **Add** — the BrowseID is extracted automatically
-
-**To add manually**, enter one per line as: Playlist Name|VLPLxxxxxxxxxx
-
-> **Note:** Playlists must be set to **Public** or **Unlisted (Hidden)** on YouTube Music — Private playlists cannot be accessed via the API.
-
-## Troubleshooting
-
-**Plugin doesn't show up after adding the repository.** LMS caches
-repository data for 5 minutes. Wait a few minutes and refresh the
-Manage Plugins page. If you've already manually installed the plugin
-(see above), it won't show as "available to install" since it's already
-active — that's expected.
-
-**No audio plays / decoder errors on hardware Squeezeboxes.** Make sure
-`ffmpeg` is installed; the plugin pipes `yt-dlp` output through `ffmpeg`
-to produce a clean MP3 stream, since raw YouTube CDN files aren't
-reliably playable by hardware decoders.
-
-**Wrong song plays after selecting one from search/browse.** This was a
-bug in earlier versions related to non-deterministic search ordering;
-should not occur in 1.1.0+. If it does, file an issue.
-
-**"yt-dlp not found."** Confirm it's in your PATH: `which yt-dlp`. If
-not, reinstall: `sudo pip3 install yt-dlp --break-system-packages`.
-
-**Check the proxy is alive:**
-
-```bash
-curl http://127.0.0.1:9876/ping
-```
-
-Should return `{"status": "ok"}`.
-
-**Enable debug logging:** In LMS, go to **Settings → Advanced → Logging**,
-set `plugin.youtubemusic` to **Debug**, and check
-`/var/log/squeezeboxserver/server.log`.
-
-## If the API changes
-
-YouTube occasionally updates internal values used by their web client.
-This plugin's only YouTube-specific code lives in `ytmproxy.py`. Two
-constants near the top are the most likely things to need updating:
-
-```python
-API_KEY = "AIzaSyC9XL3ZjWddXya6X74dJoCTL-KLET5YdCE"
-_CLIENT = {
-    "clientName":    "WEB_REMIX",
-    "clientVersion": "1.20240918.01.00",
-    ...
-}
-```
-
-To find current values: open `music.youtube.com` in a browser, open dev
-tools → Network tab, inspect any request's payload/headers for
-`clientVersion` and `X-Goog-Api-Key`.
-
-If YouTube changes the *structure* of search/browse responses (rather
-than just version strings), the parsing functions in `ytmproxy.py`
-(`_parse_song`, `_shelf_items`, `_classify_and_parse`, etc.) may need
-updates to match the new JSON shape. Inspecting a raw response and
-comparing it to the current parsing logic is the way to find what
-changed.
-
-## Architecture
-
-| Component | Role |
-|-----------|------|
-| `Plugin.pm` | Menus, lifecycle, proxy management |
-| `API.pm` | Async HTTP calls to local proxy |
-| `ProtocolHandler.pm` | `ytm://` scheme, streaming, metadata |
-| `PlaylistProtocolHandler.pm` | `ytmplaylist://` scheme — play whole playlist/album |
-| `Settings.pm` | Web settings page |
-| `ytmproxy.py` | Python sidecar on `127.0.0.1:9876` — InnerTube API, streaming, prefetch |
-
-**Request flow:**
-```
-Device → LMS → ytmproxy.py → yt-dlp | ffmpeg → MP3 → Device
-                    ↘ /prefetch/<id>  (background, next track)
-```
+Copy `Plugins/YouTubeMusic` into the LMS plugins directory (or the `InstalledPlugins/Plugins` cache) and restart LMS. `repo.xml` in this tree is not a published download yet.
 
 ## License
 
-GPL-2.0, consistent with the LMS plugin ecosystem.
-
-## Acknowledgements
-
-- [philippe44/LMS-YouTube](https://github.com/philippe44/LMS-YouTube) —
-  streaming architecture reference
-- [paul-1/plugin-SiriusXM](https://github.com/paul-1/plugin-SiriusXM) —
-  local proxy pattern reference
-- [OuterTune/OuterTune](https://github.com/OuterTune/OuterTune) —
-  InnerTube API research
+GPL-2.0. See [LICENSE](LICENSE). Upstream copyright remains with schmij97.
