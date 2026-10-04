@@ -1,0 +1,30 @@
+[% PROCESS settings/header.html %]
+
+	[% WRAPPER setting title="PLUGIN_YOUTUBEMUSIC_PLAYER_ACCOUNT" desc="PLUGIN_YOUTUBEMUSIC_PLAYER_ACCOUNT_DESC" %]
+		<select class="stdedit" name="pref_activeAccount" id="pref_activeAccount">
+			<option value="" [% IF activeAccount == '' %]selected[% END %]>[% 'PLUGIN_YOUTUBEMUSIC_PLAYER_ACCOUNT_DEFAULT' | string %]</option>
+			<option value="-" [% IF activeAccount == '-' %]selected[% END %]>[% 'PLUGIN_YOUTUBEMUSIC_ACCOUNT_ANON' | string %]</option>
+			[% FOREACH account IN accountList %]
+			<option value="[% account.id | html %]" [% IF activeAccount == account.id %]selected[% END %]>[% account.name | html %]</option>
+			[% END %]
+		</select>
+	[% END %]
+
+	[% WRAPPER setting title="PLUGIN_YOUTUBEMUSIC_STREAM_FORMAT" desc="PLUGIN_YOUTUBEMUSIC_STREAM_FORMAT_DESC" %]
+		<select class="stdedit" name="pref_streamFormat" id="pref_streamFormat">
+			<option value="auto" [% IF streamFormat == 'auto' %]selected[% END %]>Auto (server setting)</option>
+			<option value="mp3"  [% IF streamFormat == 'mp3'  %]selected[% END %]>MP3</option>
+			<option value="flac" [% IF streamFormat == 'flac' %]selected[% END %]>FLAC</option>
+			<option value="aac"  [% IF streamFormat == 'aac'  %]selected[% END %]>AAC</option>
+		</select>
+	[% END %]
+
+	[% WRAPPER setting title="PLUGIN_YOUTUBEMUSIC_BITRATE" desc="PLUGIN_YOUTUBEMUSIC_BITRATE_DESC" %]
+		<select class="stdedit" name="pref_bitrate" id="pref_bitrate">
+			<option value=""    [% IF bitrate == '' %]selected[% END %]>192 kbps</option>
+			<option value="192" [% IF bitrate == '192' %]selected[% END %]>192 kbps</option>
+			<option value="320" [% IF bitrate == '320' %]selected[% END %]>320 kbps</option>
+		</select>
+	[% END %]
+
+[% PROCESS settings/footer.html %]
