@@ -10,3 +10,5 @@ Plugins/YouTubeMusic/yt-dlp_linux_armv7l
 Plugins/YouTubeMusic/yt-dlp_linux
 Plugins/YouTubeMusic/yt-dlp_macos
 Plugins/YouTubeMusic/Bin/
+*.headers.json
+*.cookies.txt
