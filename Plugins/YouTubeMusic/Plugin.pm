@@ -7,6 +7,7 @@ use base qw(Slim::Plugin::OPMLBased);
 
 use POSIX          qw(SIGTERM);
 use File::Spec     ();
+use File::Spec::Functions qw(catdir);
 use Scalar::Util   qw(blessed);
 
 use Slim::Utils::Log;
@@ -32,9 +33,15 @@ sub initPlugin {
     my $class = shift;
 
     $prefs->init({
-        proxy_port    => 9876,
-        my_playlists  => [],
+        proxy_port             => 9876,
+        my_playlists           => [],
+        accounts               => {},
+        activeAccount          => '',
+        shareCookiesWithYtdlp  => 0,
+        codec                  => 'auto',
+        autoplay               => 1,
     });
+    $class->_write_share_flag();
 
     $class->_start_proxy();
 
@@ -71,6 +78,8 @@ sub initPlugin {
     if (main::WEBUI) {
         require Plugins::YouTubeMusic::Settings;
         Plugins::YouTubeMusic::Settings->new($class);
+        require Plugins::YouTubeMusic::Settings::Player;
+        Plugins::YouTubeMusic::Settings::Player->new();
     }
 
     $log->info("YouTube Music plugin initialised");
@@ -93,6 +102,21 @@ sub shutdownPlugin {
 
 sub getDisplayName { 'PLUGIN_YOUTUBEMUSIC' }
 sub playerMenu     { undef }
+
+sub accountsDir {
+    my $dir = catdir(Slim::Utils::Prefs::dir(), 'plugin', 'youtubemusic');
+    mkdir $dir unless -d $dir;
+    return $dir;
+}
+
+sub _write_share_flag {
+    my $class = shift;
+    my $path = File::Spec->catfile($class->accountsDir(), 'share_cookies');
+    if (open my $fh, '>', $path) {
+        print {$fh} ($prefs->get('shareCookiesWithYtdlp') ? '1' : '0');
+        close $fh;
+    }
+}
 
 sub _start_proxy {
     my $class  = shift;
@@ -127,6 +151,7 @@ sub _start_proxy {
         push @win_args, '--node',     $prefs->get('path_node')   if $prefs->get('path_node');
         push @win_args, '--log-file',        $prefs->get('log_path')         if $prefs->get('log_path');
         push @win_args, '--no-node-worker'                                          if $prefs->get('disable_node_worker');
+        push @win_args, '--accounts-dir', $class->accountsDir();
         my $pid = system(1, $python, $script, '--port', $port, '--log-level', 'WARNING', '--codec', $codec, @win_args);
         if (!$pid) {
             $log->error("system(1,...) failed: $!");
@@ -148,6 +173,7 @@ sub _start_proxy {
             push @extra_args, '--node',     $prefs->get('path_node')   if $prefs->get('path_node');
             push @extra_args, '--log-file',        $prefs->get('log_path')         if $prefs->get('log_path');
             push @extra_args, '--no-node-worker'                                          if $prefs->get('disable_node_worker');
+            push @extra_args, '--accounts-dir', $class->accountsDir();
             exec($python, $script, '--port', $port, '--log-level', 'WARNING', '--codec', $codec, @extra_args) or do {
                 $log->error("exec failed: $!");
                 exit 1;
@@ -359,7 +385,7 @@ sub _globalSearch {
         my $results = shift || [];
         my $items = eval { _items_to_menu($client, $results) } || [];
         $callback->({ items => $items });
-    });
+    }, $client);
 }
 sub _cliPlaylistCmd {
     my $request = shift;
@@ -507,43 +533,175 @@ sub _on_playlist_stop {
 }
 
 
+sub _menu_row {
+    my ($client, $name, $url, $icon, %extra) = @_;
+    return {
+        name => $name,
+        url  => $url,
+        icon => $icon,
+        %extra,
+    };
+}
+
 sub _top_level {
     my ($client, $callback, $args) = @_;
 
-    my @items = (
-        {
-            name   => cstring($client, 'PLUGIN_YOUTUBEMUSIC_SEARCH'),
-            url    => \&_search_dispatch,
-            type   => 'search',
-            search => '',
-        },
-        {
-            name  => cstring($client, 'PLUGIN_YOUTUBEMUSIC_HOME'),
-            url   => \&_home_menu,
-        },
-        {
-            name  => cstring($client, 'PLUGIN_YOUTUBEMUSIC_CHARTS'),
-            url   => \&_charts_menu,
-        },
-        {
-            name  => cstring($client, 'PLUGIN_YOUTUBEMUSIC_MY_PLAYLISTS'),
-            url   => \&_my_playlists_menu,
-        },
-        {
-            name  => cstring($client, 'PLUGIN_YOUTUBEMUSIC_NEW_RELEASES'),
-            url   => \&_new_releases_menu,
-        },
-        {
-            name  => cstring($client, 'PLUGIN_YOUTUBEMUSIC_MOODS'),
-            url   => \&_moods_menu,
-        },
-        {
-            name  => cstring($client, 'PLUGIN_YOUTUBEMUSIC_PODCASTS'),
-            url   => \&_podcasts_menu,
-        },
+    my @items;
+    my $accounts = $prefs->get('accounts') || {};
+    my $activeId = Plugins::YouTubeMusic::API->accountId($client);
+    my $activeName = ($activeId && $accounts->{$activeId}) ? ($accounts->{$activeId}{displayName} || $activeId) : '';
+    if (scalar keys %{$accounts} > 1) {
+        push @items, _menu_row(
+            $client,
+            $activeName
+                ? cstring($client, 'PLUGIN_YOUTUBEMUSIC_ACTIVE_ACCOUNT', $activeName)
+                : cstring($client, 'PLUGIN_YOUTUBEMUSIC_ACCOUNT_ANON'),
+            \&_account_switcher,
+            '/html/images/plugin.png',
+            type => 'link',
+        );
+    } elsif ($activeName) {
+        push @items, {
+            name => cstring($client, 'PLUGIN_YOUTUBEMUSIC_ACTIVE_ACCOUNT', $activeName),
+            type => 'text',
+            icon => '/html/images/plugin.png',
+        };
+    }
+
+    push @items, (
+        _menu_row($client, cstring($client, 'PLUGIN_YOUTUBEMUSIC_SEARCH'), \&_search_dispatch, '/html/images/search.png', type => 'search', search => ''),
+        _menu_row($client, cstring($client, 'PLUGIN_YOUTUBEMUSIC_HOME'), \&_home_menu, '/html/images/browselibrary.png'),
+        _menu_row($client, cstring($client, 'PLUGIN_YOUTUBEMUSIC_CHARTS'), \&_charts_menu, '/html/images/analytics.png'),
+        _menu_row($client, cstring($client, 'PLUGIN_YOUTUBEMUSIC_NEW_RELEASES'), \&_new_releases_menu, '/html/images/newmusic.png'),
+        _menu_row($client, cstring($client, 'PLUGIN_YOUTUBEMUSIC_MOODS'), \&_moods_menu, '/html/images/genres.png'),
+        _menu_row($client, cstring($client, 'PLUGIN_YOUTUBEMUSIC_MY_PLAYLISTS'), \&_my_playlists_menu, '/html/images/playlists.png'),
+        _menu_row($client, cstring($client, 'PLUGIN_YOUTUBEMUSIC_PODCASTS'), \&_podcasts_menu, '/html/images/radio.png'),
     );
 
+    if ($activeId) {
+        splice @items, ($activeName ? 2 : 1), 0, (
+            _menu_row($client, cstring($client, 'PLUGIN_YOUTUBEMUSIC_LIBRARY'), \&_library_menu, '/html/images/musicfolder.png'),
+            _menu_row($client, cstring($client, 'PLUGIN_YOUTUBEMUSIC_HISTORY'), \&_history_menu, '/html/images/years.png'),
+        );
+    }
+
     $callback->({ items => \@items });
+}
+
+sub _account_switcher {
+    my ($client, $callback) = @_;
+    my $accounts = $prefs->get('accounts') || {};
+    my $activeId = Plugins::YouTubeMusic::API->accountId($client);
+    my @items;
+    push @items, {
+        name        => cstring($client, 'PLUGIN_YOUTUBEMUSIC_ACCOUNT_ANON') . ($activeId ? '' : ' *'),
+        url         => \&_switch_account,
+        passthrough => [{ accountId => '' }],
+        icon        => '/html/images/radio.png',
+        type        => 'link',
+    };
+    for my $id (sort keys %{$accounts}) {
+        my $name = $accounts->{$id}{displayName} || $id;
+        push @items, {
+            name        => $name . ($id eq $activeId ? ' *' : ''),
+            url         => \&_switch_account,
+            passthrough => [{ accountId => $id }],
+            icon        => '/html/images/plugin.png',
+            type        => 'link',
+        };
+    }
+    $callback->({ items => \@items });
+}
+
+sub _switch_account {
+    my ($client, $callback, $args, $passthrough) = @_;
+    my $accountId = $passthrough ? ($passthrough->{accountId} // '') : '';
+    if ($client) {
+        $prefs->client($client)->set('activeAccount', $accountId ? $accountId : '-');
+    }
+    my $accounts = $prefs->get('accounts') || {};
+    my $name = $accountId && $accounts->{$accountId} ? ($accounts->{$accountId}{displayName} || $accountId) : cstring($client, 'PLUGIN_YOUTUBEMUSIC_ACCOUNT_ANON');
+    $callback->({
+        items => [{
+            name => cstring($client, 'PLUGIN_YOUTUBEMUSIC_ACCOUNT_SWITCHED', $name),
+            type => 'text',
+        }],
+    });
+}
+
+sub _library_menu {
+    my ($client, $callback) = @_;
+    unless (Plugins::YouTubeMusic::API->accountId($client)) {
+        $callback->({ items => [{ name => cstring($client, 'PLUGIN_YOUTUBEMUSIC_ACCOUNT_REQUIRED'), type => 'text' }] });
+        return;
+    }
+    $callback->({ items => [
+        _menu_row($client, cstring($client, 'PLUGIN_YOUTUBEMUSIC_LIKED'), \&_liked_menu, '/html/images/playlists.png'),
+        _menu_row($client, cstring($client, 'PLUGIN_YOUTUBEMUSIC_PLAYLISTS'), sub { _library_list('playlists', @_) }, '/html/images/playlists.png'),
+        _menu_row($client, cstring($client, 'PLUGIN_YOUTUBEMUSIC_ALBUMS'), sub { _library_list('albums', @_) }, '/html/images/albums.png'),
+        _menu_row($client, cstring($client, 'PLUGIN_YOUTUBEMUSIC_ARTISTS'), sub { _library_list('artists', @_) }, '/html/images/artists.png'),
+        _menu_row($client, cstring($client, 'PLUGIN_YOUTUBEMUSIC_SUBSCRIPTIONS'), sub { _library_list('subscriptions', @_) }, '/html/images/artists.png'),
+    ] });
+}
+
+sub _library_list {
+    my ($kind, $client, $callback) = @_;
+    Plugins::YouTubeMusic::API->library($kind, sub {
+        my $data = shift;
+        if (!$data || ref $data ne 'ARRAY') {
+            my $err = (ref $data eq 'HASH' && $data->{error}) ? $data->{error} : cstring($client, 'PLUGIN_YOUTUBEMUSIC_ERROR_PROXY_FAILED');
+            return $callback->({ items => [{ name => $err, type => 'text' }] });
+        }
+        $callback->({ items => _items_to_menu($client, $data), playall => 1 });
+    }, $client);
+}
+
+sub _liked_menu {
+    my ($client, $callback) = @_;
+    Plugins::YouTubeMusic::API->liked(sub {
+        my $data = shift;
+        unless ($data && ref $data eq 'HASH') {
+            return $callback->({ items => [{ name => cstring($client, 'PLUGIN_YOUTUBEMUSIC_ERROR_PROXY_FAILED'), type => 'text' }] });
+        }
+        if ($data->{error}) {
+            return $callback->({ items => [{ name => $data->{error}, type => 'text' }] });
+        }
+        $callback->({ items => _items_to_menu($client, $data->{items} || [], { playall => 1 }), playall => 1 });
+    }, $client);
+}
+
+sub _history_menu {
+    my ($client, $callback) = @_;
+    Plugins::YouTubeMusic::API->history(sub {
+        my $data = shift;
+        if (!$data || ref $data ne 'ARRAY') {
+            my $err = (ref $data eq 'HASH' && $data->{error}) ? $data->{error} : cstring($client, 'PLUGIN_YOUTUBEMUSIC_ACCOUNT_REQUIRED');
+            return $callback->({ items => [{ name => $err, type => 'text' }] });
+        }
+        my %groups;
+        my @order;
+        for my $item (@$data) {
+            my $label = $item->{played} || cstring($client, 'PLUGIN_YOUTUBEMUSIC_HISTORY');
+            if (!$groups{$label}) {
+                $groups{$label} = [];
+                push @order, $label;
+            }
+            push @{$groups{$label}}, $item;
+        }
+        my @items = map {
+            my $label = $_;
+            my $tracks = $groups{$label};
+            {
+                name => $label,
+                icon => '/html/images/years.png',
+                url  => sub {
+                    my ($c, $cb) = @_;
+                    $cb->({ items => _items_to_menu($c, $tracks, { playall => 1 }), playall => 1 });
+                },
+            }
+        } @order;
+        $callback->({ items => \@items });
+    }, $client);
 }
 
 sub _search_dispatch {
@@ -557,17 +715,18 @@ sub _search_dispatch {
     }
 
     my @type_menus = map {
-        my ($key, $label) = @$_;
+        my ($key, $label, $icon) = @$_;
         {
             name        => cstring($client, $label),
+            icon        => $icon,
             url         => \&_search_results,
             passthrough => [{ query => $query, type => $key }],
         }
     } (
-        [ songs     => 'PLUGIN_YOUTUBEMUSIC_SONGS'     ],
-        [ albums    => 'PLUGIN_YOUTUBEMUSIC_ALBUMS'    ],
-        [ artists   => 'PLUGIN_YOUTUBEMUSIC_ARTISTS'   ],
-        [ playlists => 'PLUGIN_YOUTUBEMUSIC_PLAYLISTS' ],
+        [ songs     => 'PLUGIN_YOUTUBEMUSIC_SONGS',     '/html/images/playall.png' ],
+        [ albums    => 'PLUGIN_YOUTUBEMUSIC_ALBUMS',    '/html/images/albums.png' ],
+        [ artists   => 'PLUGIN_YOUTUBEMUSIC_ARTISTS',   '/html/images/artists.png' ],
+        [ playlists => 'PLUGIN_YOUTUBEMUSIC_PLAYLISTS', '/html/images/playlists.png' ],
     );
 
     $callback->({ items => \@type_menus });
@@ -585,7 +744,8 @@ sub _search_results {
                 return $callback->({ items => [], error => 'Search failed' });
             }
             $callback->({ items => _items_to_menu($client, $results) });
-        }
+        },
+        $client
     );
 }
 
@@ -602,6 +762,7 @@ sub _home_menu {
             my $section = $_;
             {
                 name => $section->{title} || cstring($client, 'PLUGIN_YOUTUBEMUSIC_HOME'),
+                icon => '/html/images/browselibrary.png',
                 url  => sub {
                     my ($c, $cb) = @_;
                     $cb->({ items => _items_to_menu($c, $section->{items} // [], { playall => 1 }), playall => 1 });
@@ -610,7 +771,7 @@ sub _home_menu {
         } @$sections;
 
         $callback->({ items => \@items });
-    });
+    }, $client);
 }
 
 sub _charts_menu {
@@ -626,6 +787,7 @@ sub _charts_menu {
             my $section = $_;
             {
                 name => $section->{title} || cstring($client, 'PLUGIN_YOUTUBEMUSIC_CHARTS'),
+                icon => '/html/images/analytics.png',
                 url  => sub {
                     my ($c, $cb) = @_;
                     $cb->({ items => _items_to_menu($c, $section->{items} // [], { playall => 1 }), playall => 1 });
@@ -634,7 +796,7 @@ sub _charts_menu {
         } @$sections;
 
         $callback->({ items => \@items });
-    });
+    }, $client);
 }
 
 sub _my_playlists_menu {
@@ -654,6 +816,7 @@ sub _my_playlists_menu {
             url         => \&_playlist_menu,
             play        => "ytmplaylist://$browse_id",
             playlist    => "ytmplaylist://$browse_id",
+            icon        => '/html/images/playlists.png',
             type        => 'playlist',
             passthrough => [{ browseId => $browse_id, browse_type => 'playlist' }],
         };
@@ -679,6 +842,7 @@ sub _new_releases_menu {
             my $section = $_;
             {
                 name => $section->{title} || cstring($client, 'PLUGIN_YOUTUBEMUSIC_NEW_RELEASES'),
+                icon => '/html/images/newmusic.png',
                 url  => sub {
                     my ($c, $cb) = @_;
                     $cb->({ items => _items_to_menu($c, $section->{items} // [], { playall => 1 }), playall => 1 });
@@ -686,7 +850,7 @@ sub _new_releases_menu {
             }
         } @$sections;
         $callback->({ items => \@items });
-    });
+    }, $client);
 }
 
 sub _moods_menu {
@@ -698,12 +862,16 @@ sub _moods_menu {
         }
         my @items;
         for my $section (@$sections) {
+            my $title = $section->{title} || cstring($client, 'PLUGIN_YOUTUBEMUSIC_MOODS');
+            my @cats;
             for my $item (@{ $section->{items} // [] }) {
-                next unless $item->{browseId};
-                my $bid    = $item->{browseId};
+                next unless $item->{browseId} || $item->{params};
+                my $bid    = $item->{browseId} || 'FEmusic_moods_and_genres_category';
                 my $params = $item->{params} // '';
-                push @items, {
-                    name => $item->{title} || 'Unknown',
+                my $name   = $item->{title} || 'Unknown';
+                push @cats, {
+                    name => $name,
+                    icon => '/html/images/genres.png',
                     url  => sub {
                         my ($c, $cb) = @_;
                         Plugins::YouTubeMusic::API->browseMoodCategory($bid, $params, sub {
@@ -713,13 +881,22 @@ sub _moods_menu {
                                 push @cat_items, @{ _items_to_menu($c, $cat_section->{items} // []) };
                             }
                             $cb->({ items => \@cat_items });
-                        });
+                        }, $c);
                     },
                 };
             }
+            next unless @cats;
+            push @items, {
+                name => $title,
+                icon => '/html/images/genres.png',
+                url  => sub {
+                    my ($c, $cb) = @_;
+                    $cb->({ items => \@cats });
+                },
+            };
         }
         $callback->({ items => \@items });
-    });
+    }, $client);
 }
 
 sub _podcasts_menu {
@@ -733,6 +910,7 @@ sub _podcasts_menu {
             my $section = $_;
             {
                 name => $section->{title} || cstring($client, 'PLUGIN_YOUTUBEMUSIC_PODCASTS'),
+                icon => '/html/images/radio.png',
                 url  => sub {
                     my ($c, $cb) = @_;
                     $cb->({ items => _items_to_menu($c, $section->{items} // [], { playall => 1 }), playall => 1 });
@@ -740,7 +918,7 @@ sub _podcasts_menu {
             }
         } @$sections;
         $callback->({ items => \@items });
-    });
+    }, $client);
 }
 
 sub _artist_menu {
@@ -756,6 +934,7 @@ sub _artist_menu {
             my $section = $_;
             {
                 name => $section->{title} || 'Tracks',
+                icon => '/html/images/albums.png',
                 url  => sub {
                     my ($c, $cb) = @_;
                     $cb->({ items => _items_to_menu($c, $section->{items} // [], { playall => 1 }), playall => 1 });
@@ -764,7 +943,7 @@ sub _artist_menu {
         } @{ $data->{sections} // [] };
 
         $callback->({ items => \@items });
-    });
+    }, $client);
 }
 
 sub _playlist_menu {
@@ -791,15 +970,21 @@ my $type = $params->{browse_type} // 'playlist';
         # Prefetch track 1 immediately so it is ready when the user presses
         # Play — eliminates the 20-second yt-dlp resolution delay on first play.
         my $first_vid = (grep { $_->{videoId} } @$items)[0]->{videoId} if @$items;
-        Plugins::YouTubeMusic::API->prefetch($first_vid, sub {}) if $first_vid;
+        Plugins::YouTubeMusic::API->prefetch($first_vid, sub {}, $client) if $first_vid;
 
         $callback->({ items => _items_to_menu($client, $items, { playall => 1 }), playall => 1 });
-    });
+    }, $client);
 }
 
 sub _items_to_menu {
     my ($client, $items, $opts) = @_;
     my $playall = ($opts && $opts->{playall}) ? 1 : 0;
+    my %fallback_icon = (
+        song     => '/html/images/playall.png',
+        album    => '/html/images/albums.png',
+        artist   => '/html/images/artists.png',
+        playlist => '/html/images/playlists.png',
+    );
     my @menu;
 
     for my $item (@{ $items // [] }) {
@@ -813,6 +998,7 @@ sub _items_to_menu {
                 line2     => _song_line2($item),
                 url       => $ytm_url,
                 image     => $item->{thumbnail} || '',
+                $item->{thumbnail} ? () : (icon => $fallback_icon{song}),
                 play      => $ytm_url,
                 type      => 'audio',
                 on_select => 'play',
@@ -824,6 +1010,7 @@ sub _items_to_menu {
                 name        => $item->{title}  || 'Unknown Album',
                 line2       => join(' - ', grep { $_ } $item->{artist}, $item->{year}),
                 image       => $item->{thumbnail} || '',
+                $item->{thumbnail} ? () : (icon => $fallback_icon{album}),
                 url         => \&_playlist_menu,
                 play        => "ytmplaylist://$item->{browseId}",
                 type        => 'playlist',
@@ -834,6 +1021,7 @@ sub _items_to_menu {
             push @menu, {
                 name        => $item->{name}   || 'Unknown Artist',
                 image       => $item->{thumbnail} || '',
+                $item->{thumbnail} ? () : (icon => $fallback_icon{artist}),
                 url         => \&_artist_menu,
                 passthrough => [{ browseId => $item->{browseId} }],
             };
@@ -843,6 +1031,7 @@ sub _items_to_menu {
                 name        => $item->{title}  || 'Unknown Playlist',
                 line2       => $item->{count}  || '',
                 image       => $item->{thumbnail} || '',
+                $item->{thumbnail} ? () : (icon => $fallback_icon{playlist}),
                 url         => \&_playlist_menu,
                 play        => "ytmplaylist://$item->{browseId}",
                 type        => 'playlist',
