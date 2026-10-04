@@ -2,6 +2,7 @@
 import argparse
 import json
 import logging
+import re
 import shutil
 import subprocess
 import sys
@@ -844,11 +845,13 @@ _prefetch_started = set()
 _prefetch_lock = threading.Lock()
 _prefetch_semaphore = threading.Semaphore(2)  # Max 2 concurrent prefetch downloads
 
-def _prefetch_paths(video_id):
+def _prefetch_paths(video_id, tag="default", codec=None):
     os.makedirs(PREFETCH_DIR, exist_ok=True)
-    ext = _AUDIO_FORMAT if _AUDIO_FORMAT != "adts" else "aac"
-    tmp_path  = os.path.join(PREFETCH_DIR, f"{video_id}.{ext}.part")
-    done_path = os.path.join(PREFETCH_DIR, f"{video_id}.{ext}")
+    _codec, audio_format, _mime = _resolve_codec(codec)
+    ext = audio_format if audio_format != "adts" else "aac"
+    safe_tag = re.sub(r"[^A-Za-z0-9_.-]", "_", tag or "default")
+    tmp_path  = os.path.join(PREFETCH_DIR, f"{video_id}.{safe_tag}.{ext}.part")
+    done_path = os.path.join(PREFETCH_DIR, f"{video_id}.{safe_tag}.{ext}")
     return tmp_path, done_path
 
 
@@ -879,8 +882,8 @@ def _cleanup_old_prefetch(max_age=600):
     except Exception:
         logging.exception("Prefetch cleanup error")
 
-def _prefetch_worker(video_id):
-    tmp_path, done_path = _prefetch_paths(video_id)
+def _prefetch_worker(video_id, codec=None, bitrate=None, cookiefile=None, tag="default"):
+    tmp_path, done_path = _prefetch_paths(video_id, tag, codec)
     with _prefetch_semaphore:
         t0 = time.time()
         logging.warning("PREFETCH_TIMING %s started", video_id)
@@ -888,7 +891,7 @@ def _prefetch_worker(video_id):
             logged_first = False
             logged_128k = False
             with open(tmp_path, "wb") as f:
-                for chunk in stream_audio(video_id):
+                for chunk in stream_audio(video_id, codec, bitrate, cookiefile):
                     if not logged_first:
                         logging.warning("PREFETCH_TIMING %s first byte after %.2fs", video_id, time.time()-t0)
                         logged_first = True
@@ -907,27 +910,30 @@ def _prefetch_worker(video_id):
                 pass
         finally:
             with _prefetch_lock:
-                _prefetch_started.discard(video_id)
-def start_prefetch(video_id):
-    _, done_path = _prefetch_paths(video_id)
+                _prefetch_started.discard(f"{video_id}|{tag}")
+def start_prefetch(video_id, codec=None, bitrate=None, cookiefile=None, tag="default"):
+    key = f"{video_id}|{tag}"
+    _, done_path = _prefetch_paths(video_id, tag, codec)
     if os.path.exists(done_path):
         return "already_cached"
 
     with _prefetch_lock:
-        if video_id in _prefetch_started:
+        if key in _prefetch_started:
             return "in_progress"
-        _prefetch_started.add(video_id)
+        _prefetch_started.add(key)
 
     _cleanup_old_prefetch()
-    t = threading.Thread(target=_prefetch_worker, args=(video_id,), daemon=True)
+    t = threading.Thread(
+        target=_prefetch_worker,
+        args=(video_id, codec, bitrate, cookiefile, tag),
+        daemon=True,
+    )
     t.start()
     return "started"
 
 
-def get_prefetched_path(video_id):
-    """Return the path to a fully-cached file for video_id, or None.
-    Returns None if the file is missing or empty (failed prefetch)."""
-    _, done_path = _prefetch_paths(video_id)
+def get_prefetched_path(video_id, tag="default", codec=None):
+    _, done_path = _prefetch_paths(video_id, tag, codec)
     if os.path.exists(done_path) and os.path.getsize(done_path) > 0:
         return done_path
     # Clean up zero-byte files so they don't block future prefetch attempts
@@ -1573,22 +1579,29 @@ def _ensure_bin_in_path():
     if os.name == "nt" and BIN_DIR not in os.environ.get("PATH", ""):
         os.environ["PATH"] = BIN_DIR + os.pathsep + os.environ.get("PATH", "")
 
-def stream_audio(video_id):
+def _resolve_codec(name):
+    if name == "mp3":
+        return "libmp3lame", "mp3", "audio/mpeg"
+    if name == "flac":
+        return "flac", "flac", "audio/flac"
+    if name == "aac":
+        return "aac", "adts", "audio/aac"
+    return _AUDIO_CODEC, _AUDIO_FORMAT, _AUDIO_MIME
+
+
+def _safe_bitrate(value):
+    return value if value in ("128", "192", "256", "320") else "192"
+
+
+def stream_audio(video_id, codec=None, bitrate=None, cookiefile=None):
     _ensure_bin_in_path()
-    """
-    Yield MP3 audio bytes for the given video ID by piping yt-dlp's stdout
-    directly into ffmpeg, avoiding any temp files. ffmpeg re-muxes into a
-    simple sequential MP3 stream (moov-atom positioning in raw MP4/WebM from
-    the YouTube CDN makes direct streaming unreliable on hardware decoders).
-    """
+    audio_codec, audio_format, _audio_mime = _resolve_codec(codec)
+    audio_bitrate = _safe_bitrate(bitrate)
     ytdlp = _find_ytdlp()
     if not ytdlp:
         raise RuntimeError("yt-dlp not found in PATH")
 
     url = f"https://music.youtube.com/watch?v={video_id}"
-
-    # ytdlp_cmd is built after _get_audio_url() so we can use the CDN URL directly
-    # This avoids making yt-dlp extract the YouTube Music watch URL a second time
 
     ffmpeg_cmd = [
         _find_ffmpeg(),
@@ -1598,19 +1611,19 @@ def stream_audio(video_id):
         "-map_metadata", "-1",
         "-id3v2_version", "0",
         "-write_id3v1", "0",
-        "-f", _AUDIO_FORMAT,
-        "-codec:a", _AUDIO_CODEC,
+        "-f", audio_format,
+        "-codec:a", audio_codec,
     ]
-    if _AUDIO_CODEC not in ("flac", "pcm_s16le"):
-        ffmpeg_cmd += ["-b:a", "192k"]
-    if _AUDIO_CODEC == "flac":
+    if audio_codec not in ("flac", "pcm_s16le"):
+        ffmpeg_cmd += ["-b:a", f"{audio_bitrate}k"]
+    if audio_codec == "flac":
         ffmpeg_cmd += ["-sample_fmt", "s16"]
     ffmpeg_cmd.append("pipe:1")
 
     # Try persistent YDL first (faster — no subprocess startup)
     import time as _time
     _t0 = _time.monotonic()
-    audio_url = _get_audio_url(video_id)
+    audio_url = None if cookiefile else _get_audio_url(video_id)
     _t1 = _time.monotonic()
     _log_fn = logging.warning if audio_url else (logging.info if _ydl_available is False else logging.warning)
     _log_fn("PREFETCH_YDL videoId=%s extraction=%.2fs url=%s", video_id, _t1-_t0, "OK" if audio_url else "FAIL")
@@ -1634,8 +1647,10 @@ def stream_audio(video_id):
         "--cache-dir", os.path.join(BIN_DIR, "ytdlp_cache"),
         "--add-header", "User-Agent:com.google.android.youtube/17.29.34",
         "-o", "-",
-        ytdlp_url,
     ]
+    if cookiefile:
+        ytdlp_cmd += ["--cookies", cookiefile]
+    ytdlp_cmd.append(ytdlp_url)
     # Only use direct ffmpeg URL approach on non-ARM platforms
     # On ARM (Pi), YouTube's CDN silently times out ffmpeg connections
     if audio_url:
@@ -1646,11 +1661,11 @@ def stream_audio(video_id):
             "-i", audio_url,
             "-vn", "-map_metadata", "-1",
             "-id3v2_version", "0", "-write_id3v1", "0",
-            "-f", _AUDIO_FORMAT, "-codec:a", _AUDIO_CODEC,
+            "-f", audio_format, "-codec:a", audio_codec,
         ]
-        if _AUDIO_CODEC not in ("flac", "pcm_s16le"):
-            ffmpeg_url_cmd += ["-b:a", "192k"]
-        if _AUDIO_CODEC == "flac":
+        if audio_codec not in ("flac", "pcm_s16le"):
+            ffmpeg_url_cmd += ["-b:a", f"{audio_bitrate}k"]
+        if audio_codec == "flac":
             ffmpeg_url_cmd += ["-sample_fmt", "s16"]
         ffmpeg_url_cmd.append("pipe:1")
         ffmpeg_proc = subprocess.Popen(ffmpeg_url_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -1707,6 +1722,45 @@ def stream_audio(video_id):
                     pass
 
 
+def _playback_from_qs(p):
+    codec = p("codec") or None
+    bitrate = p("bitrate") or None
+    account = p("account") or ""
+    cookiefile = None
+    try:
+        import ytm_accounts
+        cookiefile = ytm_accounts.cookie_file(account)
+    except Exception:
+        logging.exception("Cookie lookup failed")
+    tag = f"{codec or 'auto'}-{bitrate or 'def'}-{'c' if cookiefile else 'n'}-{account or 'anon'}"
+    return codec, bitrate, account, cookiefile, tag
+
+
+def _require_account(name, p):
+    account = p("account")
+    if not account:
+        return {"error": "Sign in on this player to open this menu", "items": []}
+    data = _catalog(name, account)
+    if data is None:
+        return {"error": "YouTube Music account request failed", "items": []}
+    return data
+
+
+def _catalog(name, account, *args):
+    try:
+        import ytm_accounts
+        if not ytm_accounts.ready():
+            return None
+        return getattr(ytm_accounts, name)(account, *args)
+    except Exception:
+        logging.exception("ytmusicapi %s failed", name)
+        return None
+
+
+def _local_client(handler):
+    return handler.client_address[0] in ("127.0.0.1", "::1")
+
+
 class _Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -1724,6 +1778,35 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _error(self, msg, code=500):
         self._send_json({"error": msg}, code)
+
+    def do_POST(self):
+        if not _local_client(self):
+            return self._error("Account changes are only accepted from localhost", 403)
+        length = int(self.headers.get("Content-Length") or 0)
+        if length <= 0 or length > 512000:
+            return self._error("Invalid body", 400)
+        try:
+            payload = json.loads(self.rfile.read(length).decode("utf-8"))
+        except Exception:
+            return self._error("Invalid JSON", 400)
+        path = urlparse(self.path).path.rstrip("/")
+        try:
+            import ytm_accounts
+            if path == "/accounts/import":
+                result = ytm_accounts.import_account(
+                    payload.get("name") or "",
+                    payload.get("authUser") or "0",
+                    payload.get("material") or "",
+                )
+                self._send_json(result)
+            elif path == "/accounts/delete":
+                ok = ytm_accounts.delete_account(payload.get("id") or "")
+                self._send_json({"ok": ok})
+            else:
+                self._error("Unknown endpoint", 404)
+        except Exception as exc:
+            logging.warning("Account request failed: %s", exc)
+            self._error(str(exc), 400)
 
     def do_GET(self):
         parsed = urlparse(self.path)
@@ -1794,11 +1877,14 @@ class _Handler(BaseHTTPRequestHandler):
                 q = p("q")
                 if not q:
                     return self._error("Missing q parameter", 400)
-                self._send_json(search(q, p("type", "songs")))
+                data = _catalog("search", p("account"), q, p("type", "songs"))
+                self._send_json(search(q, p("type", "songs")) if data is None else data)
             elif path == "/browse/home":
-                self._send_json(browse_home())
+                data = _catalog("home", p("account"))
+                self._send_json(browse_home() if data is None else data)
             elif path == "/browse/charts":
-                self._send_json(browse_charts())
+                data = _catalog("charts", p("account"))
+                self._send_json(browse_charts() if data is None else data)
             elif path == "/codec":
                 self._send_json({
                     "codec":  _AUDIO_CODEC,
@@ -1932,57 +2018,88 @@ class _Handler(BaseHTTPRequestHandler):
                 vid = p("videoId")
                 if not vid:
                     return self._error("Missing videoId", 400)
-                self._send_json(browse_radio(vid))
+                data = _catalog("radio", p("account"), vid)
+                self._send_json(browse_radio(vid) if data is None else data)
             elif path == "/browse/new_releases":
-                self._send_json(browse_new_releases())
+                data = _catalog("new_releases", p("account"))
+                self._send_json(browse_new_releases() if data is None else data)
             elif path == "/browse/moods":
-                self._send_json(browse_moods())
+                data = _catalog("moods", p("account"))
+                self._send_json(browse_moods() if data is None else data)
             elif path == "/browse/mood_category":
                 bid    = p("browseId")
                 params = p("params", "")
-                if not bid:
+                if not params and not bid:
                     return self._error("Missing browseId", 400)
-                self._send_json(browse_mood_category(bid, params))
+                data = _catalog("mood_category", p("account"), params) if params else None
+                self._send_json(browse_mood_category(bid, params) if data is None else data)
             elif path == "/browse/podcasts":
                 self._send_json(browse_podcasts())
             elif path == "/playlist":
                 bid = p("browseId")
                 if not bid:
                     return self._error("Missing browseId", 400)
-                # Handle OLAK5uy_ IDs (YouTube Music browser URLs) differently
                 if bid.startswith("VLOLAK5uy_"):
                     self._send_json(browse_olak_playlist(bid[2:]))
                 elif bid.startswith("OLAK5uy_"):
                     self._send_json(browse_olak_playlist(bid))
                 else:
-                    self._send_json(browse_playlist(bid))
+                    data = _catalog("playlist", p("account"), bid)
+                    self._send_json(browse_playlist(bid) if data is None else data)
             elif path == "/album":
                 bid = p("browseId")
                 if not bid:
                     return self._error("Missing browseId", 400)
-                self._send_json(browse_playlist(bid))
+                data = _catalog("album", p("account"), bid)
+                self._send_json(browse_playlist(bid) if data is None else data)
             elif path == "/artist":
                 bid = p("browseId")
                 if not bid:
                     return self._error("Missing browseId", 400)
-                self._send_json(browse_artist(bid))
+                data = _catalog("artist", p("account"), bid)
+                self._send_json(browse_artist(bid) if data is None else data)
             elif path == "/song":
                 vid = p("videoId")
                 if not vid:
                     return self._error("Missing videoId", 400)
-                self._send_json(get_song_info(vid))
+                data = _catalog("song_info", p("account"), vid)
+                self._send_json(get_song_info(vid) if not data else data)
+            elif path == "/library/playlists":
+                self._send_json(_require_account("library_playlists", p))
+            elif path == "/library/albums":
+                self._send_json(_require_account("library_albums", p))
+            elif path == "/library/artists":
+                self._send_json(_require_account("library_artists", p))
+            elif path == "/library/subscriptions":
+                self._send_json(_require_account("library_subscriptions", p))
+            elif path == "/library/liked":
+                self._send_json(_require_account("liked", p))
+            elif path == "/history":
+                self._send_json(_require_account("history", p))
+            elif path == "/accounts":
+                if not _local_client(self):
+                    return self._error("Forbidden", 403)
+                import ytm_accounts
+                self._send_json(ytm_accounts.list_accounts())
+            elif path == "/accounts/test":
+                if not _local_client(self):
+                    return self._error("Forbidden", 403)
+                import ytm_accounts
+                self._send_json(ytm_accounts.test_account(p("id")))
 
             elif path.startswith("/stream/"):
                 vid = path[len("/stream/"):]
                 if not vid:
                     return self._error("Missing videoId", 400)
+                codec, bitrate, _account, cookiefile, tag = _playback_from_qs(p)
+                _codec_name, _fmt, mime = _resolve_codec(codec)
 
-                cached_path = get_prefetched_path(vid)
+                cached_path = get_prefetched_path(vid, tag, codec)
                 if cached_path:
                     try:
                         size = os.path.getsize(cached_path)
                         self.send_response(200)
-                        self.send_header("Content-Type", _AUDIO_MIME)
+                        self.send_header("Content-Type", mime)
                         self.send_header("Content-Length", str(size))
                         self.send_header("Cache-Control", "no-cache")
                         self.send_header("Connection", "close")
@@ -2002,14 +2119,14 @@ class _Handler(BaseHTTPRequestHandler):
                         logging.exception("Cached stream error for %s, falling back to live", vid)
 
                 # Progressive raw streaming: no chunked encoding, raw MP3 bytes
-                tmp_path, done_path = _prefetch_paths(vid)
-                cached = get_prefetched_path(vid)
+                tmp_path, done_path = _prefetch_paths(vid, tag, codec)
+                cached = get_prefetched_path(vid, tag, codec)
                 if not cached:
-                    start_prefetch(vid)
+                    start_prefetch(vid, codec, bitrate, cookiefile, tag)
                 # Send HTTP headers immediately — don't make LMS wait for yt-dlp to start
                 try:
                     self.send_response(200)
-                    self.send_header("Content-Type", _AUDIO_MIME)
+                    self.send_header("Content-Type", mime)
                     self.send_header("Cache-Control", "no-cache")
                     self.send_header("Connection", "close")
                     self.send_header("icy-metaint", "0")
@@ -2070,12 +2187,12 @@ class _Handler(BaseHTTPRequestHandler):
                 # Fallback: live stream if cache failed
                 try:
                     self.send_response(200)
-                    self.send_header("Content-Type", _AUDIO_MIME)
+                    self.send_header("Content-Type", mime)
                     self.send_header("Transfer-Encoding", "chunked")
                     self.send_header("Cache-Control", "no-cache")
                     self.send_header("icy-metaint", "0")
                     self.end_headers()
-                    for chunk in stream_audio(vid):
+                    for chunk in stream_audio(vid, codec, bitrate, cookiefile):
                         size_hdr = ("%x\r\n" % len(chunk)).encode()
                         self.wfile.write(size_hdr)
                         self.wfile.write(chunk)
@@ -2090,7 +2207,8 @@ class _Handler(BaseHTTPRequestHandler):
                 vid = path[len("/prefetch/"):]
                 if not vid:
                     return self._error("Missing videoId", 400)
-                status = start_prefetch(vid)
+                codec, bitrate, _account, cookiefile, tag = _playback_from_qs(p)
+                status = start_prefetch(vid, codec, bitrate, cookiefile, tag)
                 self._send_json({"videoId": vid, "status": status})
 
             else:
@@ -2102,7 +2220,26 @@ class _Handler(BaseHTTPRequestHandler):
             logging.exception("Proxy error on %s", self.path)
             self._error("Internal proxy error", 500)
 
-def run(port=9876, log_level="INFO", codec="auto", log_file="", no_node_worker=False):
+def _ensure_ytmusicapi():
+    try:
+        import ytmusicapi  # noqa: F401
+        return True
+    except ImportError:
+        logging.warning("Installing ytmusicapi for %s", sys.executable)
+        try:
+            subprocess.run(
+                [sys.executable, "-m", "pip", "install", "--user", "ytmusicapi"],
+                check=False,
+                timeout=180,
+            )
+            import ytmusicapi  # noqa: F401
+            return True
+        except Exception as exc:
+            logging.warning("ytmusicapi install failed: %s", exc)
+            return False
+
+
+def run(port=9876, log_level="INFO", codec="auto", log_file="", no_node_worker=False, accounts_dir=""):
     global _AUDIO_CODEC, _AUDIO_FORMAT, _AUDIO_MIME
     if codec == "mp3":
         _AUDIO_CODEC, _AUDIO_FORMAT, _AUDIO_MIME = "libmp3lame", "mp3", "audio/mpeg"
@@ -2132,6 +2269,9 @@ def run(port=9876, log_level="INFO", codec="auto", log_file="", no_node_worker=F
         force=True,
     )
     logging.info("ytmproxy log file: %s", log_file)
+    import ytm_accounts
+    ytm_accounts.configure(accounts_dir)
+    _ensure_ytmusicapi()
     # Auto-download yt-dlp on first startup if not already installed
     if not _find_ytdlp():
         logging.info("yt-dlp not found — attempting auto-download")
@@ -2203,6 +2343,7 @@ if __name__ == "__main__":
     ap.add_argument("--node",      default="", help="Override path to node binary")
     ap.add_argument("--log-file",      default="", help="Path to log file (default: BIN_DIR/ytmproxy.log)")
     ap.add_argument("--no-node-worker", action="store_true", help="Disable persistent Node worker (saves ~140MB RAM)")
+    ap.add_argument("--accounts-dir", default="", help="Directory for per-account auth files")
     args = ap.parse_args()
     # Apply path overrides before run()
     if args.ytdlp and os.path.isfile(args.ytdlp):
@@ -2214,4 +2355,4 @@ if __name__ == "__main__":
     if args.node and os.path.isfile(args.node):
         os.environ['YTM_NODE_OVERRIDE'] = args.node
         logging.info("node path override: %s", args.node)
-    run(args.port, args.log_level, args.codec, args.log_file, args.no_node_worker)
+    run(args.port, args.log_level, args.codec, args.log_file, args.no_node_worker, args.accounts_dir)
