@@ -10,6 +10,8 @@
       <changes lang="EN">Fork of 1.3.98. Catalogue calls go through ytmusicapi with an anonymous fallback. Per-player account, library, history, and mood sections. yt-dlp receives cookies only when Share cookies with yt-dlp is enabled. Per-player MP3, FLAC, or AAC.</changes>
       <creator>schmij97/OXipro</creator>
       <category>musicservices</category>
+      <url>https://github.com/OXipro/lms-ytm/releases/latest/download/lms-ytm.zip</url>
+      <sha>d0860a681542af35979464b6af2b0a2cc366178b</sha>
     </plugin>
   </plugins>
 </extensions>
