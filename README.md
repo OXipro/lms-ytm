@@ -49,7 +49,7 @@ Menu icons are the stock LMS files under `/html/images/`. Cover art on tracks an
 - Python 3.10+
 - ffmpeg
 - yt-dlp (the settings page can download it)
-- `ytmusicapi` (`pip install -r requirements.txt` for the same Python LMS launches). The proxy tries a user install on startup if the import fails.
+- `ytmusicapi` (the proxy installs it into the LMS cache on first start, including Debian/Ubuntu system Python)
 
 ## Install
 

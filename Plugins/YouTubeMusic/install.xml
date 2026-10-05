@@ -4,8 +4,8 @@
     <module>Plugins::YouTubeMusic::Plugin</module>
     <version>1.4.0</version>
     <description>PLUGIN_YOUTUBEMUSIC_DESC</description>
-    <icon>plugins/YouTubeMusic/html/YouTubeMusic_svg.png</icon>
-    <iconsvg>plugins/YouTubeMusic/html/YouTubeMusic.svg</iconsvg>
+    <icon>plugins/YouTubeMusic/HTML/EN/plugins/html/YouTubeMusic_svg.png</icon>
+    <iconsvg>plugins/YouTubeMusic/HTML/EN/plugins/html/YouTubeMusic.svg</iconsvg>
     <defaultState>enabled</defaultState>
     <targetApplication>
         <id>SlimServer</id>

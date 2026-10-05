@@ -838,7 +838,8 @@ def _detect_audio_codec():
         logging.warning("ffmpeg codec detection failed: %s", e)
         return "libmp3lame", "mp3", "audio/mpeg"
 
-_AUDIO_CODEC, _AUDIO_FORMAT, _AUDIO_MIME = _detect_audio_codec()
+# Defaults until run() can probe ffmpeg (after _find_ffmpeg and path overrides exist).
+_AUDIO_CODEC, _AUDIO_FORMAT, _AUDIO_MIME = "libmp3lame", "mp3", "audio/mpeg"
 
 PREFETCH_DIR = os.path.join(tempfile.gettempdir(), "ytmproxy_prefetch")
 _prefetch_started = set()
@@ -952,6 +953,9 @@ PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
 # We store binaries at: <cache>/YouTubeMusic/Bin
 _cache_dir = os.path.dirname(os.path.dirname(os.path.dirname(PLUGIN_DIR)))
 BIN_DIR = os.path.join(_cache_dir, "YouTubeMusic", "Bin")
+PYTHON_DIR = os.path.join(_cache_dir, "YouTubeMusic", "python")
+if PYTHON_DIR not in sys.path:
+    sys.path.insert(0, PYTHON_DIR)
 _ytdlp_exe = "yt-dlp.exe" if os.name == "nt" else "yt-dlp"
 YTDLP_BIN  = os.path.join(BIN_DIR, _ytdlp_exe)
 
@@ -2220,23 +2224,64 @@ class _Handler(BaseHTTPRequestHandler):
             logging.exception("Proxy error on %s", self.path)
             self._error("Internal proxy error", 500)
 
+def _pip_install_target(package, dest):
+    """Install a PyPI package into dest. Debian PEP 668 blocks pip --user."""
+    os.makedirs(dest, exist_ok=True)
+    base = [
+        sys.executable, "-m", "pip", "install",
+        "--target", dest,
+        "--no-cache-dir",
+        "--disable-pip-version-check",
+        "--upgrade",
+    ]
+    env = os.environ.copy()
+    env["PIP_DISABLE_PIP_VERSION_CHECK"] = "1"
+    attempts = [
+        base + [package],
+        base + ["--break-system-packages", package],
+    ]
+    last = ""
+    for cmd in attempts:
+        try:
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=180, env=env,
+            )
+            if result.returncode == 0:
+                return True, ""
+            last = (result.stderr or result.stdout or "").strip()
+        except Exception as exc:
+            last = str(exc)
+    return False, last
+
+
 def _ensure_ytmusicapi():
+    if PYTHON_DIR not in sys.path:
+        sys.path.insert(0, PYTHON_DIR)
     try:
         import ytmusicapi  # noqa: F401
         return True
     except ImportError:
-        logging.warning("Installing ytmusicapi for %s", sys.executable)
+        pass
+    logging.warning("Installing ytmusicapi for %s into %s", sys.executable, PYTHON_DIR)
+    _ok, err = _pip_install_target("ytmusicapi", PYTHON_DIR)
+    if not _ok and err:
+        logging.warning("ytmusicapi pip: %s", err[-800:])
+    import importlib
+    importlib.invalidate_caches()
+    if PYTHON_DIR not in sys.path:
+        sys.path.insert(0, PYTHON_DIR)
+    try:
+        import ytmusicapi  # noqa: F401
+        logging.info("ytmusicapi ready")
         try:
-            subprocess.run(
-                [sys.executable, "-m", "pip", "install", "--user", "ytmusicapi"],
-                check=False,
-                timeout=180,
-            )
-            import ytmusicapi  # noqa: F401
-            return True
-        except Exception as exc:
-            logging.warning("ytmusicapi install failed: %s", exc)
-            return False
+            import ytm_accounts
+            ytm_accounts.reset_ready()
+        except Exception:
+            pass
+        return True
+    except ImportError as exc:
+        logging.warning("ytmusicapi install failed: %s", err or exc)
+        return False
 
 
 def run(port=9876, log_level="INFO", codec="auto", log_file="", no_node_worker=False, accounts_dir=""):

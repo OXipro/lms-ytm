@@ -23,6 +23,11 @@ def configure(directory):
             pass
 
 
+def reset_ready():
+    global _READY
+    _READY = None
+
+
 def ready():
     global _READY
     if _READY is not None:
