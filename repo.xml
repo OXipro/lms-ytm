@@ -4,7 +4,7 @@
     <title lang="EN">YouTube Music for LMS</title>
   </details>
   <plugins>
-    <plugin name="YouTubeMusic" version="1.4.0" minTarget="9.0" maxTarget="*">
+    <plugin name="YouTubeMusic" version="1.4.1" minTarget="9.0" maxTarget="*">
       <title lang="EN">YouTube Music</title>
       <desc lang="EN">Browse, search, and stream YouTube Music. Optional per-player account for library, history, and personalised home.</desc>
       <changes lang="EN">Fork of 1.3.98. Catalogue calls go through ytmusicapi with an anonymous fallback. Per-player account, library, history, and mood sections. yt-dlp receives cookies only when Share cookies with yt-dlp is enabled. Per-player MP3, FLAC, or AAC.</changes>

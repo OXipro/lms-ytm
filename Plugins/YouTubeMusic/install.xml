@@ -2,7 +2,7 @@
 <extension>
     <name>PLUGIN_YOUTUBEMUSIC</name>
     <module>Plugins::YouTubeMusic::Plugin</module>
-    <version>1.4.0</version>
+    <version>1.4.1</version>
     <description>PLUGIN_YOUTUBEMUSIC_DESC</description>
     <icon>plugins/YouTubeMusic/HTML/EN/plugins/html/YouTubeMusic_svg.png</icon>
     <iconsvg>plugins/YouTubeMusic/HTML/EN/plugins/html/YouTubeMusic.svg</iconsvg>
