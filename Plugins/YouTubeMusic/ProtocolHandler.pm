@@ -14,6 +14,7 @@ package Plugins::YouTubeMusic::ProtocolHandler;
 
 use strict;
 use warnings;
+use Time::HiRes;
 use base qw(Slim::Player::Protocols::HTTP);
 
 use Scalar::Util       qw(blessed);
@@ -38,6 +39,7 @@ my $log   = Slim::Utils::Log->addLogCategory({
 sub isRemote        { 1 }
 sub isAudio         { 1 }
 sub isAudioURL      { 1 }
+sub isPlaylistURL   { 0 }
 sub canSeek         { 0 }
 sub canDirectStream { 0 }
 sub songBytes       {}
@@ -48,6 +50,39 @@ sub songBytes       {}
 # is not available.
 my $_audio_format = 'mp3';
 my %_radio_active;  # tracks which clients have radio running
+my %_radio_gen;
+
+sub cancel_radio {
+    my ($client) = @_;
+    return unless $client;
+    my $id = $client->id // '';
+    $_radio_gen{$id}++;
+    delete $_radio_active{$id};
+    Slim::Utils::Timers::killTimers($client, \&_delayed_radio);
+}
+
+sub arm_radio_after_stop {
+    my ($client, $vid) = @_;
+    return unless $client && $vid;
+    my $id = $client->id // '';
+    my $gen = $_radio_gen{$id} // 0;
+    Slim::Utils::Timers::setTimer(
+        $client, Time::HiRes::time() + 5, \&_delayed_radio, $vid, $gen
+    );
+}
+
+sub _delayed_radio {
+    my ($client, $vid, $gen) = @_;
+    return unless $client && $vid;
+    my $id = $client->id // '';
+    return if ($_radio_gen{$id} // 0) != $gen;
+    my $mode = eval { Slim::Player::Source::playmode($client) } // '';
+    return unless $mode eq 'stop';
+    return unless $prefs->get('autoplay') // 1;
+    $log->info("Player stopped — continuing with radio");
+    _start_radio($client, $vid);
+    $client->execute(['play']);
+}
 
 sub _init_audio_format {
     my $port = preferences('plugin.youtubemusic')->get('proxy_port') || 9876;
@@ -182,10 +217,10 @@ sub getNextTrack {
         return;
     }
 
-
     my $port       = $prefs->get('proxy_port') || 9876;
     my $server_ip  = Slim::Utils::Network::serverAddr() || '127.0.0.1';
     my $player     = eval { $song->master() };
+    cancel_radio($player) if $player;
     my $query      = Plugins::YouTubeMusic::API->streamQuery($player);
     my $streamUrl  = "http://$server_ip:$port/stream/$vid$query";
 
@@ -329,6 +364,16 @@ sub reset_radio {
     $log->debug("Radio flag reset for $client_id");
 }
 
+sub _queue_still_on {
+    my ($client, $video_id) = @_;
+    return 0 unless $client && $video_id;
+    my $cur = eval {
+        Slim::Player::Playlist::track($client, Slim::Player::Source::playingSongIndex($client));
+    };
+    my $url = $cur ? (eval { $cur->url } // '') : '';
+    return $url =~ m{^ytm://\Q$video_id\E(?:\?|$)};
+}
+
 sub _start_radio {
     my ($client, $video_id) = @_;
     return unless $client && $video_id;
@@ -340,13 +385,19 @@ sub _start_radio {
         return;
     }
     $_radio_active{$client_id} = 1;
+    my $gen = $_radio_gen{$client_id} // 0;
 
     $log->info("Starting radio from videoId: $video_id");
     $log->info("Radio client: " . ($client->id // "unknown") . " name: " . ($client->name // "unknown"));
 
     Plugins::YouTubeMusic::API->browseRadio($video_id, sub {
         my $data = shift;
+        if (($_radio_gen{$client_id} // 0) != $gen || !_queue_still_on($client, $video_id)) {
+            delete $_radio_active{$client_id};
+            return;
+        }
         unless ($data && ref $data eq 'ARRAY' && @$data) {
+            delete $_radio_active{$client_id};
             $log->warn("Radio returned no tracks for $video_id");
             return;
         }
@@ -354,6 +405,7 @@ sub _start_radio {
         # Skip the first track if it's the same as current
         my @tracks = grep { $_->{videoId} && $_->{videoId} ne $video_id } @$data;
         unless (@tracks) {
+            delete $_radio_active{$client_id};
             $log->warn("Radio returned no new tracks for $video_id");
             return;
         }

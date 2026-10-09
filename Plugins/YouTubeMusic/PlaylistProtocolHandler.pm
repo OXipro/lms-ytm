@@ -23,6 +23,7 @@ my $log = Slim::Utils::Log->addLogCategory({
 
 sub isRemote { 1 }
 sub isPlaylist { 1 }
+sub isPlaylistURL { 1 }
 sub canDirectStream { 0 }
 sub contentType { 'ytmplaylist' }
 sub getFormatForURL { 'ytmplaylist' }
@@ -38,6 +39,7 @@ sub explodePlaylist {
     }
 
     $log->info("Exploding playlist browseId=$browse_id");
+    Plugins::YouTubeMusic::ProtocolHandler::cancel_radio($client) if $client;
 
     Plugins::YouTubeMusic::API->browsePlaylist($browse_id, sub {
         my $data = shift;
@@ -49,9 +51,14 @@ sub explodePlaylist {
 
 
         my @urls;
+        my $prefetched = 0;
         for my $track (@{ $data->{items} }) {
             next unless $track->{videoId};
             Plugins::YouTubeMusic::ProtocolHandler->primeMetadata($track->{videoId}, $track);
+            if ($prefetched < 3) {
+                Plugins::YouTubeMusic::API->prefetch($track->{videoId}, sub {}, $client);
+                $prefetched++;
+            }
             my $url = "ytm://$track->{videoId}";
             push @urls, $url;
             # Update LMS track database so queue shows title/artist immediately

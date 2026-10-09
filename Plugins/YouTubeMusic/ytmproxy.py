@@ -1409,7 +1409,7 @@ def _get_ydl():
                 node_path = _find_node()
                 js_runtimes = {'node': {'path': node_path}} if node_path else {'node': {}}
                 ydl_opts = {
-                    'format': 'bestaudio',
+                    'format': _STREAM_FORMAT,
                     'quiet': True,
                     'no_warnings': True,
                     'no_check_certificates': True,
@@ -1427,6 +1427,19 @@ def _get_ydl():
                 logging.warning("Failed to create persistent YoutubeDL: %s", e)
                 _ydl_instance = None
     return _ydl_instance
+
+# Prefer containers ffmpeg can play from the first bytes. A progressive
+# m4a often keeps its header at the end of the file, so transcoding cannot
+# start until the whole song has downloaded.
+_STREAM_FORMAT = (
+    "bestaudio[ext=webm][acodec=opus]/"
+    "bestaudio[ext=webm]/"
+    "bestaudio[protocol^=m3u8]/"
+    "bestaudio"
+)
+_audio_url_cache = {}
+_AUDIO_URL_TTL = 2 * 60 * 60
+
 
 def _get_audio_url(video_id):
     """Use persistent YoutubeDL to extract audio URL. Returns URL or None."""
@@ -1449,6 +1462,23 @@ def _get_audio_url(video_id):
     except Exception as e:
         logging.warning("YDL extract failed for %s: %s", video_id, e)
         return None
+
+
+def _cached_audio_url(video_id):
+    now = time.time()
+    hit = _audio_url_cache.get(video_id)
+    if hit and hit[1] > now:
+        return hit[0]
+    url = _get_audio_url(video_id)
+    if url:
+        _audio_url_cache[video_id] = (url, now + _AUDIO_URL_TTL)
+    else:
+        _audio_url_cache.pop(video_id, None)
+    return url
+
+
+def _drop_audio_url(video_id):
+    _audio_url_cache.pop(video_id, None)
 
 def _compile_ytdlp_bytecode():
     """Pre-compile yt-dlp Python source to .pyc bytecode for faster startup on slow ARM CPUs."""
@@ -1607,27 +1637,41 @@ def stream_audio(video_id, codec=None, bitrate=None, cookiefile=None):
 
     url = f"https://music.youtube.com/watch?v={video_id}"
 
-    ffmpeg_cmd = [
+    def _ffmpeg_out(cmd):
+        cmd += [
+            "-vn",
+            "-map_metadata", "-1",
+            "-id3v2_version", "0",
+            "-write_id3v1", "0",
+            "-muxdelay", "0",
+            "-muxpreload", "0",
+            "-flush_packets", "1",
+            "-f", audio_format,
+            "-codec:a", audio_codec,
+        ]
+        if audio_codec not in ("flac", "pcm_s16le"):
+            cmd += ["-b:a", f"{audio_bitrate}k"]
+        if audio_format == "mp3":
+            cmd += ["-write_xing", "0"]
+        if audio_codec == "flac":
+            cmd += ["-sample_fmt", "s16"]
+        cmd.append("pipe:1")
+        return cmd
+
+    ffmpeg_cmd = _ffmpeg_out([
         _find_ffmpeg(),
+        "-nostdin",
         "-loglevel", "error",
+        "-fflags", "+nobuffer+discardcorrupt+genpts",
+        "-probesize", "32768",
+        "-analyzeduration", "0",
         "-i", "pipe:0",
-        "-vn",
-        "-map_metadata", "-1",
-        "-id3v2_version", "0",
-        "-write_id3v1", "0",
-        "-f", audio_format,
-        "-codec:a", audio_codec,
-    ]
-    if audio_codec not in ("flac", "pcm_s16le"):
-        ffmpeg_cmd += ["-b:a", f"{audio_bitrate}k"]
-    if audio_codec == "flac":
-        ffmpeg_cmd += ["-sample_fmt", "s16"]
-    ffmpeg_cmd.append("pipe:1")
+    ])
 
     # Try persistent YDL first (faster — no subprocess startup)
     import time as _time
     _t0 = _time.monotonic()
-    audio_url = None if cookiefile else _get_audio_url(video_id)
+    audio_url = None if cookiefile else _cached_audio_url(video_id)
     _t1 = _time.monotonic()
     _log_fn = logging.warning if audio_url else (logging.info if _ydl_available is False else logging.warning)
     _log_fn("PREFETCH_YDL videoId=%s extraction=%.2fs url=%s", video_id, _t1-_t0, "OK" if audio_url else "FAIL")
@@ -1645,7 +1689,7 @@ def stream_audio(video_id, codec=None, bitrate=None, cookiefile=None):
         "--extractor-retries", "2",
         "--no-part",
         "--http-chunk-size", "1M",
-        "-f", "bestaudio[ext=m4a]/bestaudio[ext=mp3]/bestaudio",
+        "-f", _STREAM_FORMAT,
         *(["--js-runtimes", f"node:{_NODE_PATH}"] if _NODE_PATH else ["--js-runtimes", "node"]),
         "--extractor-args", "youtube:player_client=web_embedded",
         "--cache-dir", os.path.join(BIN_DIR, "ytdlp_cache"),
@@ -1658,20 +1702,19 @@ def stream_audio(video_id, codec=None, bitrate=None, cookiefile=None):
     # Only use direct ffmpeg URL approach on non-ARM platforms
     # On ARM (Pi), YouTube's CDN silently times out ffmpeg connections
     if audio_url:
-        ffmpeg_url_cmd = [
-            _find_ffmpeg(), "-loglevel", "error",
+        ffmpeg_url_cmd = _ffmpeg_out([
+            _find_ffmpeg(), "-nostdin", "-loglevel", "error",
+            "-fflags", "+nobuffer+discardcorrupt+genpts",
+            "-flags", "low_delay",
+            "-probesize", "32768",
+            "-analyzeduration", "0",
+            "-reconnect", "1",
+            "-reconnect_streamed", "1",
+            "-reconnect_delay_max", "2",
             "-user_agent", "Mozilla/5.0 (Linux; Android 6.0; Nexus 5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Mobile Safari/537.36",
             "-headers", "Accept: */*\r\nAccept-Language: en-us,en;q=0.5\r\n",
             "-i", audio_url,
-            "-vn", "-map_metadata", "-1",
-            "-id3v2_version", "0", "-write_id3v1", "0",
-            "-f", audio_format, "-codec:a", audio_codec,
-        ]
-        if audio_codec not in ("flac", "pcm_s16le"):
-            ffmpeg_url_cmd += ["-b:a", f"{audio_bitrate}k"]
-        if audio_codec == "flac":
-            ffmpeg_url_cmd += ["-sample_fmt", "s16"]
-        ffmpeg_url_cmd.append("pipe:1")
+        ])
         ffmpeg_proc = subprocess.Popen(ffmpeg_url_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         bytes_sent = 0
         try:
@@ -1689,6 +1732,8 @@ def stream_audio(video_id, codec=None, bitrate=None, cookiefile=None):
                 logging.warning("ffmpeg URL stderr: %s", stderr_out[:500])
         if bytes_sent > 0:
             return
+        _drop_audio_url(video_id)
+        ytdlp_cmd[-1] = url
         # Fallback: subprocess yt-dlp
         logging.warning("ffmpeg URL produced 0 bytes for %s, falling back to subprocess", video_id)
     if _ydl_available is not False:

@@ -69,12 +69,6 @@ sub initPlugin {
         weight => 10,
     );
 
-    # Register CLI handler for Jivelite/SB Radio playlist play
-    Slim::Control::Request::addDispatch(
-        ['youtubemusic', 'playlist', '_method'],
-        [1, 1, 1, \&_cliPlaylistCmd]
-    );
-
     if (main::WEBUI) {
         require Plugins::YouTubeMusic::Settings;
         Plugins::YouTubeMusic::Settings->new($class);
@@ -369,6 +363,11 @@ sub postinitPlugin {
 }
 
 
+sub _ytm_icon {
+    return __PACKAGE__->_pluginDataFor('icon')
+        || 'plugins/YouTubeMusic/html/YouTubeMusic_svg.png';
+}
+
 sub _globalSearch {
     my ( $client, $callback, $params ) = @_;
     $params = {} unless ref($params) eq 'HASH';
@@ -387,116 +386,6 @@ sub _globalSearch {
         $callback->({ items => $items });
     }, $client);
 }
-sub _cliPlaylistCmd {
-    my $request = shift;
-    my $client  = $request->client;
-    my $method  = $request->getParam('_method') || 'play';
-    my $item_id = $request->getParam('item_id') || '';
-    my $touch   = $request->getParam('touchToPlay') || '';
-
-    my $is_playall = ($method eq 'playall');
-    $method = 'play' if $is_playall;
-    $log->info("_cliPlaylistCmd: method=$method item_id=$item_id touchToPlay=$touch is_playall=$is_playall");
-    # Only handle touchToPlay or playall requests from Jivelite/SB Radio/SqueezePlay
-    # For normal Material skin play commands, delegate to XMLBrowser
-    unless ($touch || $is_playall) {
-        Slim::Control::XMLBrowser::cliQuery('youtubemusic', Plugins::YouTubeMusic::Plugin->feed($request->client), $request);
-        return;
-    }
-
-    # Strip session ID prefix if present (e.g. "abc123.3.0" -> "3.0")
-    $item_id =~ s/^[a-f0-9\-]{8,}\.//;
-    $touch   =~ s/^[a-f0-9\-]{8,}\.//;
-
-    # Use touchToPlay for navigation if available (it has the full path)
-    my $nav_id = $touch || $item_id;
-
-    # Split into path components e.g. "3.0.0" -> (3, 0, 0)
-    my @path = split /\./, $nav_id;
-
-    $log->info("_cliPlaylistCmd: navigating path=" . join('.', @path));
-
-    # Get top-level feed
-    _top_level($client, sub {
-        my $feed = shift;
-        my $items = ref $feed eq 'HASH' ? $feed->{items} : $feed;
-        unless ($items && ref $items eq 'ARRAY') {
-            $log->warn("_cliPlaylistCmd: no top-level items");
-            $request->setStatusDone();
-            return;
-        }
-
-        # Navigate to the target item
-        my $level0_idx = $path[0];
-        my $item = $items->[$level0_idx];
-        unless ($item) {
-            $log->warn("_cliPlaylistCmd: no item at index $level0_idx");
-            $request->setStatusDone();
-            return;
-        }
-
-        $log->info("_cliPlaylistCmd: level0 item=" . ($item->{name} || 'unknown'));
-
-        # If path has more components, navigate deeper
-        if (scalar @path >= 2 && ref $item->{url} eq 'CODE') {
-            my $pt = $item->{passthrough} || [{}];
-            $item->{url}->($client, sub {
-                my $subfeed = shift;
-                my $subitems = ref $subfeed eq 'HASH' ? $subfeed->{items} : $subfeed;
-                unless ($subitems && ref $subitems eq 'ARRAY') {
-                    $request->setStatusDone();
-                    return;
-                }
-                my $level1_idx = $path[1];
-                my $subitem = $subitems->[$level1_idx];
-                unless ($subitem) {
-                    $log->warn("_cliPlaylistCmd: no item at index $level1_idx");
-                    $request->setStatusDone();
-                    return;
-                }
-                $log->info("_cliPlaylistCmd: level1 item=" . ($subitem->{name} || 'unknown'));
-
-                # Play the playlist URL
-                my $play_url = $subitem->{play} || $subitem->{url};
-                if ($play_url && !ref($play_url)) {
-                    $log->info("_cliPlaylistCmd: playing $play_url");
-                    if ($play_url =~ /^ytmplaylist:\/\//) {
-                        # Explode playlist then start from the right track index
-                        my $start_index = defined $path[2] ? $path[2] : 0;
-                        Plugins::YouTubeMusic::PlaylistProtocolHandler->explodePlaylist(
-                            $client, $play_url, sub {
-                                my $urls = shift;
-                                if ($urls && @$urls) {
-                                    if ($method eq 'play') {
-                                        $client->execute(['playlist', 'loadtracks', 'listref', $urls, undef, $start_index]);
-                                        $client->execute(['play']);
-                                    } else {
-                                        $client->execute(['playlist', 'addtracks', 'listref', $urls]);
-                                    }
-                                }
-                                $request->setStatusDone();
-                            }
-                        );
-                        return;
-                    } else {
-                        $client->execute(['playlist', $method, $play_url]);
-                    }
-                }
-                $request->setStatusDone();
-            }, {}, @{$pt});
-        } else {
-            my $play_url = $item->{play} || $item->{url};
-            if ($play_url && !ref($play_url)) {
-                $log->info("_cliPlaylistCmd: playing $play_url");
-                $client->execute(['playlist', $method, $play_url]);
-            }
-            $request->setStatusDone();
-        }
-    }, {});
-
-    $request->setStatusProcessing();
-}
-
 sub _on_playlist_stop {
     my $request = shift;
     my $client  = $request->client() or return;
@@ -516,20 +405,7 @@ sub _on_playlist_stop {
     my ($vid) = $url =~ m{^ytm://([A-Za-z0-9_\-]+)};
     return unless $vid;
 
-    # Delay to avoid firing during track transitions — check player is
-    # still stopped after 5 seconds before triggering radio
-    Slim::Utils::Timers::setTimer(
-        $client, Time::HiRes::time() + 5,
-        sub {
-            my $mode = Slim::Player::Source::playmode($client);
-            return unless $mode eq 'stop';
-            return unless $prefs->get('autoplay') // 1;
-            $log->info("Player genuinely stopped — triggering radio");
-            Plugins::YouTubeMusic::ProtocolHandler::reset_radio($client);
-            Plugins::YouTubeMusic::ProtocolHandler::_start_radio($client, $vid);
-            $client->execute(['play']);
-        }
-    );
+    Plugins::YouTubeMusic::ProtocolHandler::arm_radio_after_stop($client, $vid);
 }
 
 
@@ -550,22 +426,18 @@ sub _top_level {
     my $accounts = $prefs->get('accounts') || {};
     my $activeId = Plugins::YouTubeMusic::API->accountId($client);
     my $activeName = ($activeId && $accounts->{$activeId}) ? ($accounts->{$activeId}{displayName} || $activeId) : '';
-    if (scalar keys %{$accounts} > 1) {
+    my $icon = _ytm_icon();
+    my $has_accounts = scalar keys %{$accounts};
+    if ($has_accounts) {
         push @items, _menu_row(
             $client,
             $activeName
                 ? cstring($client, 'PLUGIN_YOUTUBEMUSIC_ACTIVE_ACCOUNT', $activeName)
                 : cstring($client, 'PLUGIN_YOUTUBEMUSIC_ACCOUNT_ANON'),
             \&_account_switcher,
-            '/html/images/plugin.png',
+            $icon,
             type => 'link',
         );
-    } elsif ($activeName) {
-        push @items, {
-            name => cstring($client, 'PLUGIN_YOUTUBEMUSIC_ACTIVE_ACCOUNT', $activeName),
-            type => 'text',
-            icon => '/html/images/plugin.png',
-        };
     }
 
     push @items, (
@@ -579,7 +451,7 @@ sub _top_level {
     );
 
     if ($activeId) {
-        splice @items, ($activeName ? 2 : 1), 0, (
+        splice @items, ($has_accounts ? 2 : 1), 0, (
             _menu_row($client, cstring($client, 'PLUGIN_YOUTUBEMUSIC_LIBRARY'), \&_library_menu, '/html/images/musicfolder.png'),
             _menu_row($client, cstring($client, 'PLUGIN_YOUTUBEMUSIC_HISTORY'), \&_history_menu, '/html/images/years.png'),
         );
@@ -588,25 +460,45 @@ sub _top_level {
     $callback->({ items => \@items });
 }
 
+sub _player_account_raw {
+    my ($client) = @_;
+    return '' unless $client;
+    my $raw = $prefs->client($client)->get('activeAccount');
+    return defined $raw ? $raw : '';
+}
+
 sub _account_switcher {
     my ($client, $callback) = @_;
     my $accounts = $prefs->get('accounts') || {};
-    my $activeId = Plugins::YouTubeMusic::API->accountId($client);
-    my @items;
-    push @items, {
-        name        => cstring($client, 'PLUGIN_YOUTUBEMUSIC_ACCOUNT_ANON') . ($activeId ? '' : ' *'),
+    my $raw = _player_account_raw($client);
+    my $icon = _ytm_icon();
+    my $server_id = $prefs->get('activeAccount') || '';
+    my $server_name = ($server_id && $accounts->{$server_id})
+        ? ($accounts->{$server_id}{displayName} || $server_id)
+        : '';
+    my $default_label = cstring($client, 'PLUGIN_YOUTUBEMUSIC_PLAYER_ACCOUNT_DEFAULT');
+    $default_label .= " ($server_name)" if $server_name;
+
+    my @items = ({
+        name        => $default_label . ($raw eq '' ? ' *' : ''),
+        url         => \&_switch_account,
+        passthrough => [{ accountId => '', useDefault => 1 }],
+        icon        => $icon,
+        type        => 'link',
+    }, {
+        name        => cstring($client, 'PLUGIN_YOUTUBEMUSIC_ACCOUNT_ANON') . ($raw eq '-' ? ' *' : ''),
         url         => \&_switch_account,
         passthrough => [{ accountId => '' }],
-        icon        => '/html/images/radio.png',
+        icon        => $icon,
         type        => 'link',
-    };
+    });
     for my $id (sort keys %{$accounts}) {
         my $name = $accounts->{$id}{displayName} || $id;
         push @items, {
-            name        => $name . ($id eq $activeId ? ' *' : ''),
+            name        => $name . ($raw eq $id ? ' *' : ''),
             url         => \&_switch_account,
             passthrough => [{ accountId => $id }],
-            icon        => '/html/images/plugin.png',
+            icon        => $icon,
             type        => 'link',
         };
     }
@@ -616,16 +508,31 @@ sub _account_switcher {
 sub _switch_account {
     my ($client, $callback, $args, $passthrough) = @_;
     my $accountId = $passthrough ? ($passthrough->{accountId} // '') : '';
+    my $useDefault = $passthrough && $passthrough->{useDefault};
     if ($client) {
-        $prefs->client($client)->set('activeAccount', $accountId ? $accountId : '-');
+        if ($useDefault) {
+            $prefs->client($client)->set('activeAccount', '');
+        } elsif ($accountId && ($prefs->get('accounts') || {})->{$accountId}) {
+            $prefs->client($client)->set('activeAccount', $accountId);
+        } else {
+            $prefs->client($client)->set('activeAccount', '-');
+        }
     }
     my $accounts = $prefs->get('accounts') || {};
-    my $name = $accountId && $accounts->{$accountId} ? ($accounts->{$accountId}{displayName} || $accountId) : cstring($client, 'PLUGIN_YOUTUBEMUSIC_ACCOUNT_ANON');
-    $callback->({
-        items => [{
-            name => cstring($client, 'PLUGIN_YOUTUBEMUSIC_ACCOUNT_SWITCHED', $name),
-            type => 'text',
-        }],
+    my $effective = Plugins::YouTubeMusic::API->accountId($client);
+    my $name = ($effective && $accounts->{$effective})
+        ? ($accounts->{$effective}{displayName} || $effective)
+        : cstring($client, 'PLUGIN_YOUTUBEMUSIC_ACCOUNT_ANON');
+    if ($client) {
+        $client->showBriefly({
+            line => [ cstring($client, 'PLUGIN_YOUTUBEMUSIC'), cstring($client, 'PLUGIN_YOUTUBEMUSIC_ACCOUNT_SWITCHED', $name) ],
+            jive => { type => 'popupplay', text => [ cstring($client, 'PLUGIN_YOUTUBEMUSIC_ACCOUNT_SWITCHED', $name) ] },
+        });
+    }
+    _top_level($client, sub {
+        my $feed = shift || {};
+        $feed->{title} = cstring($client, 'PLUGIN_YOUTUBEMUSIC');
+        $callback->($feed);
     });
 }
 
@@ -815,7 +722,6 @@ sub _my_playlists_menu {
             name        => $name,
             url         => \&_playlist_menu,
             play        => "ytmplaylist://$browse_id",
-            playlist    => "ytmplaylist://$browse_id",
             icon        => '/html/images/playlists.png',
             type        => 'playlist',
             passthrough => [{ browseId => $browse_id, browse_type => 'playlist' }],
@@ -967,10 +873,13 @@ my $type = $params->{browse_type} // 'playlist';
                 $item->{album} = $album_title if $item->{type} && $item->{type} eq 'song';
             }
         }
-        # Prefetch track 1 immediately so it is ready when the user presses
-        # Play — eliminates the 20-second yt-dlp resolution delay on first play.
-        my $first_vid = (grep { $_->{videoId} } @$items)[0]->{videoId} if @$items;
-        Plugins::YouTubeMusic::API->prefetch($first_vid, sub {}, $client) if $first_vid;
+        my $prefetched = 0;
+        for my $track (@$items) {
+            last if $prefetched >= 3;
+            next unless $track->{videoId};
+            Plugins::YouTubeMusic::API->prefetch($track->{videoId}, sub {}, $client);
+            $prefetched++;
+        }
 
         $callback->({ items => _items_to_menu($client, $items, { playall => 1 }), playall => 1 });
     }, $client);
@@ -979,11 +888,12 @@ my $type = $params->{browse_type} // 'playlist';
 sub _items_to_menu {
     my ($client, $items, $opts) = @_;
     my $playall = ($opts && $opts->{playall}) ? 1 : 0;
+    my $ytm_icon = _ytm_icon();
     my %fallback_icon = (
-        song     => '/html/images/playall.png',
-        album    => '/html/images/albums.png',
-        artist   => '/html/images/artists.png',
-        playlist => '/html/images/playlists.png',
+        song     => $ytm_icon,
+        album    => $ytm_icon,
+        artist   => $ytm_icon,
+        playlist => $ytm_icon,
     );
     my @menu;
 

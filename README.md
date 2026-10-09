@@ -30,7 +30,7 @@ Use browser auth, as described in the [ytmusicapi browser setup](https://ytmusic
 
 In LMS: Settings, Advanced, YouTube Music. Name the account, set Auth user (the `X-Goog-AuthUser` index, usually `0`; required when several Google accounts share one browser), paste, save. Files are stored under the LMS prefs directory `plugin/youtubemusic/`, mode `0600`. They are not written to the log.
 
-Each player picks an account under player settings, or from the account row inside the app when more than one account exists. "No account" on a player forces anonymous browsing even if the server has a default.
+Each player picks an account under player settings, or from the account row in the YouTube Music menu on the player (Radio, web, or controller). That row is shown whenever at least one account is saved. "No account" on a player forces anonymous browsing even if the server has a default.
 
 ## Audio
 
@@ -41,7 +41,7 @@ The proxy transcodes to a sequential stream because raw YouTube files do not sta
 
 MP3 192 is the default that hardware players accept. FLAC is for players that decode it. If ffmpeg has no `libmp3lame` (piCorePlayer's `pcp-ffmpeg` extension), the proxy still falls back to FLAC or AAC.
 
-Menu icons are the stock LMS files under `/html/images/`. Cover art on tracks and albums still comes from YouTube.
+The app icon is the YouTube Music mark. Menu section icons are the stock LMS files under `/html/images/`. Cover art on tracks, albums, and playlists comes from YouTube.
 
 ## Requirements
 
@@ -53,7 +53,13 @@ Menu icons are the stock LMS files under `/html/images/`. Cover art on tracks an
 
 ## Install
 
-Copy `Plugins/YouTubeMusic` into the LMS plugins directory (or the `InstalledPlugins/Plugins` cache) and restart LMS. `repo.xml` in this tree is not a published download yet.
+Add this repository in LMS under Settings, Plugins, Additional repositories:
+
+`https://raw.githubusercontent.com/OXipro/lms-ytm/main/repo.xml`
+
+Install or update YouTube Music from the plugin list, then restart LMS.
+
+You can also copy `Plugins/YouTubeMusic` into the LMS plugins directory and restart LMS.
 
 ## License
 
