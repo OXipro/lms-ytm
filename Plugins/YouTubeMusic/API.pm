@@ -96,8 +96,9 @@ sub search {
 }
 
 sub browseHome {
-    my ($class, $cb, $client) = @_;
-    _get(_with_account('/browse/home', $client), $cb);
+    my ($class, $cb, $client, $refresh) = @_;
+    my $path = $refresh ? '/browse/home?refresh=1' : '/browse/home';
+    _get(_with_account($path, $client), $cb);
 }
 
 sub browseCharts {

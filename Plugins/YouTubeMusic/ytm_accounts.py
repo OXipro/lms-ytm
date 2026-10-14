@@ -458,9 +458,58 @@ def moods(account_id):
     return _call(account_id, run)
 
 
+def _mood_playlists(yt, params):
+    """Same browse as ytmusicapi, but a title without a link must not abort the list."""
+    from ytmusicapi.navigation import (
+        CAROUSEL_CONTENTS,
+        GRID_ITEMS,
+        SECTION_LIST,
+        SINGLE_COLUMN_TAB,
+        nav,
+    )
+    from ytmusicapi.parsers.browsing import parse_playlist
+
+    response = yt._send_request(
+        "browse",
+        {"browseId": "FEmusic_moods_and_genres_category", "params": params},
+    )
+    sections = nav(response, SINGLE_COLUMN_TAB + SECTION_LIST, True) or []
+    playlists = []
+    for section in sections:
+        path = None
+        if "gridRenderer" in section:
+            path = GRID_ITEMS
+        elif "musicCarouselShelfRenderer" in section:
+            path = CAROUSEL_CONTENTS
+        elif "musicImmersiveCarouselShelfRenderer" in section:
+            path = ["musicImmersiveCarouselShelfRenderer", "contents"]
+        if not path:
+            continue
+        for result in nav(section, path, True) or []:
+            if not isinstance(result, dict):
+                continue
+            data = (
+                result.get("musicTwoRowItemRenderer")
+                or result.get("musicResponsiveListItemRenderer")
+                or result
+            )
+            try:
+                parsed = parse_playlist(data)
+            except Exception:
+                logging.debug("Skipping a mood playlist row without a link", exc_info=True)
+                continue
+            if parsed:
+                playlists.append(parsed)
+    return playlists
+
+
 def mood_category(account_id, params):
     def run(yt):
-        playlists = yt.get_mood_playlists(params)
+        try:
+            playlists = yt.get_mood_playlists(params)
+        except Exception:
+            logging.warning("get_mood_playlists failed, parsing the shelf directly")
+            playlists = _mood_playlists(yt, params)
         items = _map_many(playlists)
         return [{"title": "Playlists", "items": items}] if items else []
     return _call(account_id, run)
@@ -588,9 +637,111 @@ def liked(account_id):
     return _call(account_id, run)
 
 
+def _runs_text(node):
+    if isinstance(node, str):
+        return node
+    if not isinstance(node, dict):
+        return ""
+    if node.get("simpleText"):
+        return node["simpleText"]
+    runs = node.get("runs") or []
+    return "".join((run.get("text") or "") for run in runs if isinstance(run, dict))
+
+
+def _video_id_from_list_item(renderer):
+    overlay = (
+        renderer.get("overlay", {})
+        .get("musicItemThumbnailOverlayRenderer", {})
+        .get("content", {})
+        .get("musicPlayButtonRenderer", {})
+        .get("playNavigationEndpoint", {})
+        .get("watchEndpoint", {})
+        .get("videoId")
+    )
+    if overlay:
+        return overlay
+    watch = renderer.get("navigationEndpoint", {}).get("watchEndpoint", {})
+    if watch.get("videoId"):
+        return watch["videoId"]
+    playlist_item = renderer.get("playlistItemData") or {}
+    return playlist_item.get("videoId") or ""
+
+
+def _column_text(renderer, index):
+    try:
+        runs = renderer["flexColumns"][index]["musicResponsiveListItemFlexColumnRenderer"]["text"]["runs"]
+        return runs[0].get("text", "") if runs else ""
+    except (IndexError, KeyError, TypeError):
+        return ""
+
+
+def _list_item_thumb(renderer):
+    thumbs = (
+        renderer.get("thumbnail", {})
+        .get("musicThumbnailRenderer", {})
+        .get("thumbnail", {})
+        .get("thumbnails")
+        or []
+    )
+    return _thumb(thumbs)
+
+
+def _history_items(response):
+    found = []
+    seen = set()
+
+    def add_renderer(renderer, played):
+        video_id = _video_id_from_list_item(renderer)
+        if not video_id or video_id in seen:
+            return
+        seen.add(video_id)
+        found.append({
+            "type": "song",
+            "title": _column_text(renderer, 0),
+            "artist": _column_text(renderer, 1),
+            "album": _column_text(renderer, 2),
+            "videoId": video_id,
+            "thumbnail": _list_item_thumb(renderer),
+            "url": f"ytm://{video_id}",
+            "played": played or "History",
+        })
+
+    def walk(node, played):
+        if isinstance(node, dict):
+            shelf = node.get("musicShelfRenderer")
+            if isinstance(shelf, dict):
+                label = _runs_text(shelf.get("title") or {}) or played
+                for entry in shelf.get("contents") or []:
+                    if not isinstance(entry, dict):
+                        continue
+                    renderer = entry.get("musicResponsiveListItemRenderer")
+                    if isinstance(renderer, dict):
+                        add_renderer(renderer, label)
+            renderer = node.get("musicResponsiveListItemRenderer")
+            if isinstance(renderer, dict):
+                add_renderer(renderer, played)
+            for value in node.values():
+                walk(value, played)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value, played)
+
+    walk(response, "")
+    return found
+
+
 def history(account_id):
     def run(yt):
-        return _map_many(yt.get_history())
+        yt._check_auth()
+        response = yt._send_request("browse", {"browseId": "FEmusic_history"})
+        items = _history_items(response)
+        if items:
+            return items
+        try:
+            return _map_many(yt.get_history())
+        except Exception:
+            logging.warning("History browse returned no tracks and get_history failed", exc_info=True)
+            return []
     return _call(account_id, run)
 
 

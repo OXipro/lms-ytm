@@ -365,7 +365,7 @@ sub postinitPlugin {
 
 sub _ytm_icon {
     return __PACKAGE__->_pluginDataFor('icon')
-        || 'plugins/YouTubeMusic/html/YouTubeMusic_svg.png';
+        || 'plugins/YouTubeMusic/html/images/YouTubeMusic_svg.png';
 }
 
 sub _globalSearch {
@@ -442,8 +442,8 @@ sub _top_level {
 
     push @items, (
         _menu_row($client, cstring($client, 'PLUGIN_YOUTUBEMUSIC_SEARCH'), \&_search_dispatch, '/html/images/search.png', type => 'search', search => ''),
-        _menu_row($client, cstring($client, 'PLUGIN_YOUTUBEMUSIC_HOME'), \&_home_menu, '/html/images/browselibrary.png'),
-        _menu_row($client, cstring($client, 'PLUGIN_YOUTUBEMUSIC_CHARTS'), \&_charts_menu, '/html/images/analytics.png'),
+        _menu_row($client, cstring($client, 'PLUGIN_YOUTUBEMUSIC_HOME'), \&_home_menu, 'plugins/YouTubeMusic/html/images/featured_MTL_icon_home.png', forceRefresh => 1),
+        _menu_row($client, cstring($client, 'PLUGIN_YOUTUBEMUSIC_CHARTS'), \&_charts_menu, 'plugins/YouTubeMusic/html/images/charts_MTL_icon_leaderboard.png', forceRefresh => 1),
         _menu_row($client, cstring($client, 'PLUGIN_YOUTUBEMUSIC_NEW_RELEASES'), \&_new_releases_menu, '/html/images/newmusic.png'),
         _menu_row($client, cstring($client, 'PLUGIN_YOUTUBEMUSIC_MOODS'), \&_moods_menu, '/html/images/genres.png'),
         _menu_row($client, cstring($client, 'PLUGIN_YOUTUBEMUSIC_MY_PLAYLISTS'), \&_my_playlists_menu, '/html/images/playlists.png'),
@@ -585,6 +585,9 @@ sub _history_menu {
             my $err = (ref $data eq 'HASH' && $data->{error}) ? $data->{error} : cstring($client, 'PLUGIN_YOUTUBEMUSIC_ACCOUNT_REQUIRED');
             return $callback->({ items => [{ name => $err, type => 'text' }] });
         }
+        if (!@$data) {
+            return $callback->({ items => [{ name => cstring($client, 'PLUGIN_YOUTUBEMUSIC_HISTORY_EMPTY'), type => 'text' }] });
+        }
         my %groups;
         my @order;
         for my $item (@$data) {
@@ -656,8 +659,30 @@ sub _search_results {
     );
 }
 
+sub _section_cover {
+    my ($section) = @_;
+    for my $item (@{ $section->{items} // [] }) {
+        return $item->{thumbnail} if $item->{thumbnail};
+    }
+    return '';
+}
+
+sub _section_link {
+    my ($client, $section, $fallback) = @_;
+    my $cover = _section_cover($section);
+    return {
+        name => $section->{title} || '',
+        $cover ? (image => $cover) : (icon => $fallback),
+        url  => sub {
+            my ($c, $cb) = @_;
+            $cb->({ items => _items_to_menu($c, $section->{items} // [], { playall => 1 }), playall => 1 });
+        },
+    };
+}
+
 sub _home_menu {
-    my ($client, $callback) = @_;
+    my ($client, $callback, $args, $pt) = @_;
+    my $refresh = (ref $pt eq 'HASH' && $pt->{refresh}) ? 1 : 0;
 
     Plugins::YouTubeMusic::API->browseHome(sub {
         my $sections = shift;
@@ -665,20 +690,20 @@ sub _home_menu {
             return $callback->({ items => [] });
         }
 
-        my @items = map {
-            my $section = $_;
+        my @items = (
             {
-                name => $section->{title} || cstring($client, 'PLUGIN_YOUTUBEMUSIC_HOME'),
-                icon => '/html/images/browselibrary.png',
-                url  => sub {
-                    my ($c, $cb) = @_;
-                    $cb->({ items => _items_to_menu($c, $section->{items} // [], { playall => 1 }), playall => 1 });
-                },
-            }
+                name        => cstring($client, 'PLUGIN_YOUTUBEMUSIC_REFRESH'),
+                icon        => 'plugins/YouTubeMusic/html/images/refresh_MTL_icon_refresh.png',
+                url         => \&_home_menu,
+                passthrough => [{ refresh => 1 }],
+            },
+        );
+        push @items, map {
+            _section_link($client, $_, '/html/images/albums.png')
         } @$sections;
 
-        $callback->({ items => \@items });
-    }, $client);
+        $callback->({ items => \@items, forceRefresh => 1 });
+    }, $client, $refresh);
 }
 
 sub _charts_menu {
@@ -692,17 +717,12 @@ sub _charts_menu {
 
         my @items = map {
             my $section = $_;
-            {
-                name => $section->{title} || cstring($client, 'PLUGIN_YOUTUBEMUSIC_CHARTS'),
-                icon => '/html/images/analytics.png',
-                url  => sub {
-                    my ($c, $cb) = @_;
-                    $cb->({ items => _items_to_menu($c, $section->{items} // [], { playall => 1 }), playall => 1 });
-                },
-            }
+            my $row = _section_link($client, $section, '/html/images/playlists.png');
+            $row->{name} ||= cstring($client, 'PLUGIN_YOUTUBEMUSIC_CHARTS');
+            $row;
         } @$sections;
 
-        $callback->({ items => \@items });
+        $callback->({ items => \@items, forceRefresh => 1 });
     }, $client);
 }
 
@@ -746,14 +766,9 @@ sub _new_releases_menu {
         }
         my @items = map {
             my $section = $_;
-            {
-                name => $section->{title} || cstring($client, 'PLUGIN_YOUTUBEMUSIC_NEW_RELEASES'),
-                icon => '/html/images/newmusic.png',
-                url  => sub {
-                    my ($c, $cb) = @_;
-                    $cb->({ items => _items_to_menu($c, $section->{items} // [], { playall => 1 }), playall => 1 });
-                },
-            }
+            my $row = _section_link($client, $section, '/html/images/newmusic.png');
+            $row->{name} ||= cstring($client, 'PLUGIN_YOUTUBEMUSIC_NEW_RELEASES');
+            $row;
         } @$sections;
         $callback->({ items => \@items });
     }, $client);
@@ -777,7 +792,6 @@ sub _moods_menu {
                 my $name   = $item->{title} || 'Unknown';
                 push @cats, {
                     name => $name,
-                    icon => '/html/images/genres.png',
                     url  => sub {
                         my ($c, $cb) = @_;
                         Plugins::YouTubeMusic::API->browseMoodCategory($bid, $params, sub {

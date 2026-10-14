@@ -342,10 +342,11 @@ def search(query, type_filter="songs"):
     _cache_set(cache_key, results)
     return results
 
-def browse_home():
-    cached = _cache_get("home")
-    if cached is not None:
-        return cached
+def browse_home(skip_cache=False):
+    if not skip_cache:
+        cached = _cache_get("home")
+        if cached is not None:
+            return cached
     data     = _post("browse", {"browseId": "FEmusic_home"})
     sections = _single_col_sections(data)
     result   = []
@@ -1929,8 +1930,11 @@ class _Handler(BaseHTTPRequestHandler):
                 data = _catalog("search", p("account"), q, p("type", "songs"))
                 self._send_json(search(q, p("type", "songs")) if data is None else data)
             elif path == "/browse/home":
+                refresh = p("refresh") == "1"
+                if refresh:
+                    _CACHE.pop("home", None)
                 data = _catalog("home", p("account"))
-                self._send_json(browse_home() if data is None else data)
+                self._send_json(browse_home(skip_cache=refresh) if data is None else data)
             elif path == "/browse/charts":
                 data = _catalog("charts", p("account"))
                 self._send_json(browse_charts() if data is None else data)
