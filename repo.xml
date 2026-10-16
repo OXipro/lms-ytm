@@ -4,14 +4,14 @@
     <title lang="EN">YouTube Music for LMS</title>
   </details>
   <plugins>
-    <plugin name="YouTubeMusic" version="1.4.2" minTarget="9.0" maxTarget="*">
+    <plugin name="YouTubeMusic" version="1.4.3" minTarget="9.0" maxTarget="*">
       <title lang="EN">YouTube Music</title>
       <desc lang="EN">Browse, search, and stream YouTube Music. Optional per-player account for library, history, and personalised home.</desc>
-      <changes lang="EN">1.4.2: Faster playback start. Radio no longer replaces a playlist you chose. Account row on the player, with the YouTube Music icon.</changes>
+      <changes lang="EN">1.4.3: Refresh on Home. Shelf rows show cover art. History and moods still load when YouTube changes the page.</changes>
       <creator>schmij97/OXipro</creator>
       <category>musicservices</category>
-      <url>https://github.com/OXipro/lms-ytm/releases/download/v1.4.2/lms-ytm.zip</url>
-      <sha>c5927c4c94d77cdcbe172080197c3e73282d9c5d</sha>
+      <url>https://github.com/OXipro/lms-ytm/releases/download/v1.4.3/lms-ytm.zip</url>
+      <sha>b8b4603615e5c45f9effadc07a092250249b9a5a</sha>
     </plugin>
   </plugins>
 </extensions>
