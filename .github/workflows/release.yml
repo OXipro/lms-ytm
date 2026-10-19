@@ -6,6 +6,7 @@ name: Release
 # The zip URL inside that file is version-pinned so the SHA cannot drift.
 
 on:
+  workflow_dispatch:
   push:
     tags:
       - "v*"
