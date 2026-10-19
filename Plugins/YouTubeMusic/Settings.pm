@@ -107,7 +107,18 @@ sub handler {
                     channel     => $data->{channelHandle} || '',
                 };
                 $prefs->set('accounts', $accounts);
-                $prefs->set('activeAccount', $data->{id}) unless $prefs->get('activeAccount');
+                my $previous = $prefs->get('activeAccount') || '';
+                $prefs->set('activeAccount', $data->{id});
+                if ($previous && $previous ne $data->{id}) {
+                    eval {
+                        require Slim::Player::Client;
+                        for my $player (Slim::Player::Client::clients()) {
+                            my $raw = $prefs->client($player)->get('activeAccount');
+                            next unless defined $raw && $raw eq $previous;
+                            $prefs->client($player)->set('activeAccount', '');
+                        }
+                    };
+                }
                 $params->{accountImportStatus} = $data->{accountName}
                     ? "Saved account " . $data->{accountName} . ($data->{channelHandle} ? " (" . $data->{channelHandle} . ")" : '')
                     : "Saved account " . $accounts->{$data->{id}}{displayName};

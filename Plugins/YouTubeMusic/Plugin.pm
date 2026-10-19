@@ -687,7 +687,10 @@ sub _home_menu {
     Plugins::YouTubeMusic::API->browseHome(sub {
         my $sections = shift;
         unless ($sections && ref $sections eq 'ARRAY') {
-            return $callback->({ items => [] });
+            my $err = (ref $sections eq 'HASH' && $sections->{error})
+                ? $sections->{error}
+                : cstring($client, 'PLUGIN_YOUTUBEMUSIC_ERROR_PROXY_FAILED');
+            return $callback->({ items => [{ name => $err, type => 'text' }] });
         }
 
         my @items = (

@@ -1931,10 +1931,19 @@ class _Handler(BaseHTTPRequestHandler):
                 self._send_json(search(q, p("type", "songs")) if data is None else data)
             elif path == "/browse/home":
                 refresh = p("refresh") == "1"
+                account = p("account")
                 if refresh:
                     _CACHE.pop("home", None)
-                data = _catalog("home", p("account"))
-                self._send_json(browse_home(skip_cache=refresh) if data is None else data)
+                data = _catalog("home", account)
+                # A signed-in home must stay that account's home. The anonymous
+                # browse is a different Quick picks shelf.
+                if account:
+                    if data is None:
+                        self._send_json({"error": "YouTube Music home failed for this account"})
+                    else:
+                        self._send_json(data)
+                else:
+                    self._send_json(browse_home(skip_cache=refresh) if data is None else data)
             elif path == "/browse/charts":
                 data = _catalog("charts", p("account"))
                 self._send_json(browse_charts() if data is None else data)

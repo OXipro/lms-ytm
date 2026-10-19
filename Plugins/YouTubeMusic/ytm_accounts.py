@@ -4,12 +4,20 @@ import os
 import re
 import stat
 import threading
+import time
+import urllib.parse
 
 _DIR = ""
 _LOCK = threading.Lock()
+_CLIENT_LOCKS = {}
 _CLIENTS = {}
 _ANON = None
 _READY = None
+_EMFILE_LOGGED = 0.0
+_SONG_CACHE = {}
+_SONG_INFLIGHT = {}
+_SONG_TTL = 6 * 3600
+_SONG_FAIL_TTL = 20
 
 
 def configure(directory):
@@ -122,28 +130,74 @@ def _anon():
     return _ANON
 
 
+def _client_lock(account_id):
+    key = account_id or ""
+    with _LOCK:
+        lock = _CLIENT_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _CLIENT_LOCKS[key] = lock
+        return lock
+
+
+def _close_yt(yt):
+    session = getattr(yt, "_session", None) or getattr(yt, "session", None)
+    if session is None:
+        return
+    try:
+        session.close()
+    except Exception:
+        logging.debug("Failed to close a YouTube Music session", exc_info=True)
+
+
+def _tame_session(yt):
+    """Keep one account from opening an unbounded number of TLS sockets."""
+    session = getattr(yt, "_session", None) or getattr(yt, "session", None)
+    if session is None:
+        return
+    try:
+        from requests.adapters import HTTPAdapter
+        adapter = HTTPAdapter(pool_connections=2, pool_maxsize=4, pool_block=True)
+        session.mount("https://", adapter)
+        session.mount("http://", adapter)
+    except Exception:
+        logging.debug("Could not cap the YouTube Music connection pool", exc_info=True)
+
+
 def client_for(account_id):
     if not ready():
         raise RuntimeError("ytmusicapi is not installed")
     if not account_id:
-        return _anon()
+        yt = _anon()
+        _tame_session(yt)
+        return yt
     path = _headers_path(account_id)
     if not os.path.isfile(path):
         logging.info("No auth file for account %s; using anonymous catalog", account_id)
-        return _anon()
+        yt = _anon()
+        _tame_session(yt)
+        return yt
     mtime = os.path.getmtime(path)
     with _LOCK:
         cached = _CLIENTS.get(account_id)
         if cached and cached[0] == mtime:
             return cached[1]
+        old = cached
     from ytmusicapi import YTMusic
     index = _read_index()
     user = (index.get(account_id) or {}).get("authUser") or None
     if user in ("", "0", 0, None):
         user = None
     yt = YTMusic(path, user=user)
+    _tame_session(yt)
     with _LOCK:
+        current = _CLIENTS.get(account_id)
+        if current and current[0] == mtime and current is not old:
+            _close_yt(yt)
+            return current[1]
         _CLIENTS[account_id] = (mtime, yt)
+    if old and old[1] is not yt:
+        _close_yt(old[1])
     return yt
 
 
@@ -159,7 +213,9 @@ def delete_account(account_id):
         except OSError:
             pass
     with _LOCK:
-        _CLIENTS.pop(account_id, None)
+        old = _CLIENTS.pop(account_id, None)
+    if old:
+        _close_yt(old[1])
     return True
 
 
@@ -250,7 +306,8 @@ def import_account(name, auth_user, material):
     _write_index(index)
     info = {"accountName": "", "channelHandle": ""}
     try:
-        info = client_for(account_id).get_account_info() or info
+        with _client_lock(account_id):
+            info = client_for(account_id).get_account_info() or info
     except Exception as exc:
         logging.warning("Account %s saved but get_account_info failed: %s", account_id, exc)
         info["warning"] = str(exc)
@@ -328,6 +385,11 @@ def map_item(item):
         return None
     kind = (item.get("resultType") or item.get("type") or "").lower()
     video_id = item.get("videoId") or ""
+    if not video_id:
+        playlist_id = item.get("playlistId") or ""
+        if playlist_id.startswith("RDAMVM") and len(playlist_id) > 6:
+            video_id = playlist_id[6:]
+            kind = kind or "song"
     browse_id = item.get("browseId") or ""
     if kind in ("song", "video", "episode") or (video_id and kind not in ("album", "artist", "playlist")):
         if video_id and kind != "playlist":
@@ -398,19 +460,261 @@ def _rows_from_home(rows):
     return sections
 
 
+def _is_too_many_files(exc):
+    seen = set()
+    current = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, OSError) and getattr(current, "errno", None) == 24:
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
+def _log_call_failure(exc):
+    global _EMFILE_LOGGED
+    if _is_too_many_files(exc):
+        now = time.time()
+        if now - _EMFILE_LOGGED > 30:
+            _EMFILE_LOGGED = now
+            logging.error(
+                "YouTube Music requests stopped: too many open files. "
+                "Waiting for the current requests to finish."
+            )
+        return
+    logging.exception("ytmusicapi call failed")
+
+
 def _call(account_id, fn):
     if not ready():
         return None
     try:
-        return fn(client_for(account_id))
-    except Exception:
-        logging.exception("ytmusicapi call failed")
+        with _client_lock(account_id):
+            return fn(client_for(account_id))
+    except Exception as exc:
+        _log_call_failure(exc)
         return None
+
+
+def _section_list(response):
+    if not isinstance(response, dict):
+        return None
+    continuation = (response.get("continuationContents") or {}).get("sectionListContinuation")
+    if isinstance(continuation, dict):
+        return continuation
+    tabs = (
+        (response.get("contents") or {})
+        .get("singleColumnBrowseResultsRenderer", {})
+        .get("tabs")
+        or []
+    )
+    for tab in tabs:
+        if not isinstance(tab, dict):
+            continue
+        section = (
+            (tab.get("tabRenderer") or {})
+            .get("content", {})
+            .get("sectionListRenderer")
+        )
+        if isinstance(section, dict):
+            return section
+    return None
+
+
+def _continuation_query(section):
+    for cont in (section or {}).get("continuations") or []:
+        if not isinstance(cont, dict):
+            continue
+        token = (cont.get("nextContinuationData") or {}).get("continuation")
+        if not token:
+            token = (
+                (cont.get("continuationItemRenderer") or {})
+                .get("continuationEndpoint", {})
+                .get("continuationCommand", {})
+                .get("token")
+            )
+        if token:
+            quoted = urllib.parse.quote(str(token), safe="")
+            return f"&ctoken={quoted}&continuation={quoted}&type=next"
+    return ""
+
+
+def _shelf_title(shelf):
+    header = shelf.get("header") or {}
+    if isinstance(header, dict):
+        for value in header.values():
+            if not isinstance(value, dict):
+                continue
+            text = _runs_text(value.get("title") or {})
+            if text:
+                return text
+    return _runs_text(shelf.get("title") or {})
+
+
+def _renderer_thumbs(renderer):
+    for path in (
+        ("thumbnailRenderer", "musicThumbnailRenderer", "thumbnail", "thumbnails"),
+        ("thumbnail", "musicThumbnailRenderer", "thumbnail", "thumbnails"),
+    ):
+        node = renderer
+        for key in path:
+            if not isinstance(node, dict):
+                node = None
+                break
+            node = node.get(key)
+        if node:
+            return node
+    return []
+
+
+def _watch_video_id(renderer):
+    watch = (renderer.get("navigationEndpoint") or {}).get("watchEndpoint") or {}
+    if watch.get("videoId"):
+        return watch["videoId"]
+    playlist_id = watch.get("playlistId") or ""
+    if playlist_id.startswith("RDAMVM") and len(playlist_id) > 6:
+        return playlist_id[6:]
+    return _video_id_from_list_item(renderer)
+
+
+def _page_type(renderer):
+    browse = (renderer.get("navigationEndpoint") or {}).get("browseEndpoint") or {}
+    return (
+        (browse.get("browseEndpointContextSupportedConfigs") or {})
+        .get("browseEndpointContextMusicConfig", {})
+        .get("pageType")
+        or ""
+    )
+
+
+def _home_item(renderer):
+    if not isinstance(renderer, dict):
+        return None
+    video_id = _watch_video_id(renderer)
+    browse = (renderer.get("navigationEndpoint") or {}).get("browseEndpoint") or {}
+    browse_id = browse.get("browseId") or ""
+    page_type = _page_type(renderer)
+    title = _runs_text(renderer.get("title") or {}) or _column_text(renderer, 0)
+    thumbs = _renderer_thumbs(renderer)
+    subtitle = _runs_text(renderer.get("subtitle") or {}) or _column_text(renderer, 1)
+    subtitle_parts = [part.strip() for part in re.split(r"\s*[•·]\s*", subtitle) if part.strip()] if subtitle else []
+    artist = subtitle_parts[0] if subtitle_parts else ""
+    # A Quick picks card carries both a song id and a radio playlist id.
+    # The song is what YouTube Music shows in that row.
+    if video_id and "PLAYLIST" not in page_type and not browse_id.startswith("VL"):
+        album = _column_text(renderer, 2)
+        return {
+            "resultType": "song",
+            "title": title,
+            "videoId": video_id,
+            "artist": artist,
+            "album": album,
+            "thumbnails": thumbs,
+        }
+    if browse_id.startswith("MPRE") or "ALBUM" in page_type:
+        return {
+            "resultType": "album",
+            "title": title,
+            "artist": artist,
+            "browseId": browse_id,
+            "thumbnails": thumbs,
+        }
+    if browse_id.startswith("UC") or "ARTIST" in page_type or "USER_CHANNEL" in page_type:
+        return {
+            "resultType": "artist",
+            "artist": title,
+            "title": title,
+            "browseId": browse_id,
+            "subscribers": subtitle,
+            "thumbnails": thumbs,
+        }
+    if browse_id.startswith("VL") or "PLAYLIST" in page_type:
+        return {
+            "resultType": "playlist",
+            "title": title,
+            "browseId": browse_id if browse_id.startswith("VL") else "VL" + browse_id,
+            "thumbnails": thumbs,
+            "subtitle": subtitle,
+        }
+    return None
+
+
+_SHELF_KEYS = (
+    "musicCarouselShelfRenderer",
+    "musicImmersiveCarouselShelfRenderer",
+    "musicShelfRenderer",
+    "musicPlaylistShelfRenderer",
+    "gridRenderer",
+)
+
+
+def _row_from_section(section):
+    if not isinstance(section, dict):
+        return None
+    shelf = None
+    for key in _SHELF_KEYS:
+        if isinstance(section.get(key), dict):
+            shelf = section[key]
+            break
+    if shelf is None:
+        return None
+    items = []
+    for entry in shelf.get("contents") or shelf.get("items") or []:
+        if not isinstance(entry, dict):
+            continue
+        renderer = (
+            entry.get("musicTwoRowItemRenderer")
+            or entry.get("musicResponsiveListItemRenderer")
+            or entry.get("musicMultiRowListItemRenderer")
+            or entry.get("playlistPanelVideoRenderer")
+        )
+        item = _home_item(renderer) if renderer else None
+        if item:
+            items.append(item)
+    if not items:
+        return None
+    return {"title": _shelf_title(shelf) or "Home", "contents": items}
+
+
+def _home_rows(yt, limit=12):
+    body = {"browseId": "FEmusic_home"}
+    response = yt._send_request("browse", body)
+    rows = []
+    seen_tokens = set()
+    for _ in range(6):
+        section = _section_list(response) or {}
+        for entry in section.get("contents") or []:
+            row = _row_from_section(entry)
+            if row:
+                rows.append(row)
+        if len(rows) >= limit:
+            break
+        query = _continuation_query(section)
+        if not query or query in seen_tokens:
+            break
+        seen_tokens.add(query)
+        response = yt._send_request("browse", body, query)
+    return rows[:limit]
 
 
 def home(account_id):
     def run(yt):
-        return _rows_from_home(yt.get_home(limit=6))
+        rows = None
+        mobile = getattr(yt, "as_mobile", None)
+        if mobile:
+            try:
+                with mobile():
+                    rows = _home_rows(yt, limit=12)
+            except Exception:
+                logging.warning("Mobile home failed, using the web home", exc_info=True)
+                rows = None
+        if not rows:
+            try:
+                rows = _home_rows(yt, limit=12)
+            except Exception:
+                logging.warning("Home browse failed, using get_home", exc_info=True)
+                rows = yt.get_home(limit=12)
+        return _rows_from_home(rows)
     return _call(account_id, run)
 
 
@@ -620,20 +924,124 @@ def library_artists(account_id):
     return _call(account_id, lambda yt: _map_many(yt.get_library_artists(limit=100)))
 
 
+def _songs_from_response(response):
+    found = []
+    seen = set()
+
+    def add(item, played):
+        video_id = item.get("videoId") if isinstance(item, dict) else ""
+        if not video_id or video_id in seen:
+            return
+        seen.add(video_id)
+        if played and not item.get("played"):
+            item = {**item, "played": played}
+        found.append(item)
+
+    def take_shelf(shelf, played):
+        label = _shelf_title(shelf) or played
+        for entry in shelf.get("contents") or shelf.get("items") or []:
+            if not isinstance(entry, dict):
+                continue
+            renderer = (
+                entry.get("musicResponsiveListItemRenderer")
+                or entry.get("musicTwoRowItemRenderer")
+                or entry.get("musicMultiRowListItemRenderer")
+                or entry.get("playlistPanelVideoRenderer")
+            )
+            item = _home_item(renderer) if renderer else None
+            if item and item.get("resultType") == "song":
+                add(item, label)
+
+    def walk(node, played):
+        if isinstance(node, dict):
+            for key in _SHELF_KEYS:
+                shelf = node.get(key)
+                if isinstance(shelf, dict):
+                    take_shelf(shelf, played)
+            for value in node.values():
+                walk(value, played)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value, played)
+
+    walk(response, "")
+    return found
+
+
+def _artists_from_response(response, limit=100):
+    found = []
+    seen = set()
+
+    def consider(renderer):
+        if len(found) >= limit or not isinstance(renderer, dict):
+            return
+        item = _home_item(renderer)
+        browse_id = item.get("browseId") if item else ""
+        if not item or item.get("resultType") != "artist" or not browse_id or browse_id in seen:
+            return
+        seen.add(browse_id)
+        found.append(item)
+
+    def walk(node):
+        if len(found) >= limit:
+            return
+        if isinstance(node, dict):
+            renderer = (
+                node.get("musicResponsiveListItemRenderer")
+                or node.get("musicTwoRowItemRenderer")
+                or node.get("musicMultiRowListItemRenderer")
+            )
+            if renderer:
+                consider(renderer)
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value)
+
+    walk(response)
+    return found
+
+
 def library_subscriptions(account_id):
-    return _call(account_id, lambda yt: _map_many(yt.get_library_subscriptions(limit=100)))
+    def run(yt):
+        items = []
+        try:
+            items = yt.get_library_subscriptions(limit=100) or []
+        except Exception:
+            logging.warning("get_library_subscriptions failed, reading the subscriptions page", exc_info=True)
+        mapped = _map_many(items)
+        if mapped:
+            return mapped
+        response = yt._send_request("browse", {"browseId": "FEmusic_library_corpus_artists"})
+        return _map_many(_artists_from_response(response, limit=100))
+    return _call(account_id, run)
+
+
+def _liked_payload(tracks, title):
+    items = []
+    for track in tracks or []:
+        if not isinstance(track, dict):
+            continue
+        raw = track if track.get("resultType") or track.get("type") else {**track, "resultType": "song"}
+        mapped = map_item(raw)
+        if mapped and mapped.get("type") == "song":
+            items.append(mapped)
+    return {"title": title or "Liked Songs", "items": items}
 
 
 def liked(account_id):
     def run(yt):
-        data = yt.get_liked_songs(limit=200)
-        tracks = data.get("tracks") or []
-        items = []
-        for track in tracks:
-            mapped = map_item({**track, "resultType": "song"})
-            if mapped:
-                items.append(mapped)
-        return {"title": data.get("title") or "Liked Songs", "items": items}
+        try:
+            data = yt.get_liked_songs(limit=200) or {}
+        except Exception:
+            logging.warning("get_liked_songs failed, reading the liked playlist", exc_info=True)
+            data = {}
+        payload = _liked_payload(data.get("tracks"), data.get("title"))
+        if payload["items"]:
+            return payload
+        response = yt._send_request("browse", {"browseId": "VLLM"})
+        return _liked_payload(_songs_from_response(response), "Liked Songs")
     return _call(account_id, run)
 
 
@@ -734,7 +1142,7 @@ def history(account_id):
     def run(yt):
         yt._check_auth()
         response = yt._send_request("browse", {"browseId": "FEmusic_history"})
-        items = _history_items(response)
+        items = _map_many(_songs_from_response(response)) or _history_items(response)
         if items:
             return items
         try:
@@ -757,7 +1165,33 @@ def radio(account_id, video_id):
     return _call(account_id, run)
 
 
+def _song_cache_get(video_id):
+    hit = _SONG_CACHE.get(video_id)
+    if not hit or hit[0] <= time.time():
+        return None, False
+    return hit[1], True
+
+
 def song_info(account_id, video_id):
+    if not video_id:
+        return None
+    cached, fresh = _song_cache_get(video_id)
+    if fresh:
+        return cached
+
+    with _LOCK:
+        event = _SONG_INFLIGHT.get(video_id)
+        if event is None:
+            event = threading.Event()
+            _SONG_INFLIGHT[video_id] = event
+            owner = True
+        else:
+            owner = False
+    if not owner:
+        event.wait(timeout=25)
+        cached, fresh = _song_cache_get(video_id)
+        return cached if fresh else None
+
     def run(yt):
         data = yt.get_song(video_id)
         details = data.get("videoDetails") or {}
@@ -777,12 +1211,26 @@ def song_info(account_id, video_id):
             "thumbnail": _thumb(thumbs),
             "videoId": details.get("videoId") or video_id,
         }
-    return _call(account_id, run)
+
+    try:
+        result = _call(account_id, run)
+        _SONG_CACHE[video_id] = (time.time() + (_SONG_TTL if result else _SONG_FAIL_TTL), result)
+        if len(_SONG_CACHE) > 2000:
+            now = time.time()
+            expired = [key for key, value in _SONG_CACHE.items() if value[0] <= now]
+            for key in expired:
+                _SONG_CACHE.pop(key, None)
+        return result
+    finally:
+        with _LOCK:
+            _SONG_INFLIGHT.pop(video_id, None)
+        event.set()
 
 
 def test_account(account_id):
-    yt = client_for(account_id)
-    info = yt.get_account_info()
+    with _client_lock(account_id):
+        yt = client_for(account_id)
+        info = yt.get_account_info()
     return {
         "ok": True,
         "accountName": info.get("accountName") or "",

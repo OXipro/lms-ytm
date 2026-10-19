@@ -337,6 +337,8 @@ sub _prefetch_next_track {
 # string, and fighting that plumbing for remote/ephemeral tracks isn't
 # worth it) and instead let getMetadataFor read straight from here.
 my %_metadata_cache;
+my %_metadata_inflight;
+my %_metadata_fail_until;
 
 # Called synchronously by Plugin.pm/PlaylistProtocolHandler.pm with data we
 # already have on hand from search/browse results, so the cache is warm
@@ -437,28 +439,49 @@ sub _start_radio {
     }, $client);
 }
 
+sub _remember_metadata {
+    my ($video_id, $info) = @_;
+    return 0 unless $video_id && $info && ref $info eq 'HASH' && ($info->{title} || $info->{artist});
+    $_metadata_cache{$video_id} = {
+        title    => $info->{title}     || '',
+        artist   => $info->{artist}    || '',
+        album    => $info->{album}     || '',
+        duration => $info->{duration}  || 0,
+        cover    => $info->{thumbnail} || '',
+    };
+    delete $_metadata_fail_until{$video_id};
+    return 1;
+}
+
+sub _request_metadata {
+    my ($video_id, $cb) = @_;
+    return if !$video_id || $_metadata_cache{$video_id};
+    return if $_metadata_inflight{$video_id};
+    return if ($_metadata_fail_until{$video_id} || 0) > time();
+    $_metadata_inflight{$video_id} = 1;
+    Plugins::YouTubeMusic::API->getSongInfo($video_id, sub {
+        my $info = shift;
+        delete $_metadata_inflight{$video_id};
+        unless (_remember_metadata($video_id, $info)) {
+            $_metadata_fail_until{$video_id} = time() + 20;
+            return;
+        }
+        $cb->($info) if $cb;
+        Slim::Control::Request::notifyFromArray(undef, ['newmetadata']);
+    });
+}
+
 sub _fetch_metadata {
     my ($video_id, $song) = @_;
 
-    Plugins::YouTubeMusic::API->getSongInfo($video_id, sub {
+    _request_metadata($video_id, sub {
         my $info = shift;
-        return unless $info && ref $info eq 'HASH';
-
-        $_metadata_cache{$video_id} = {
-            title    => $info->{title}     || '',
-            artist   => $info->{artist}    || '',
-            album    => $info->{album}     || '',
-            duration => $info->{duration}  || 0,
-            cover    => $info->{thumbnail} || '',
-        };
-
-        my $track = $song->currentTrack();
+        my $track = eval { $song->currentTrack() };
+        return unless $track;
         $track->title($info->{title})        if $info->{title};
         $track->secs($info->{duration})      if $info->{duration};
         $track->coverurl($info->{thumbnail}) if $info->{thumbnail};
         $track->update();
-
-        Slim::Control::Request::notifyFromArray(undef, ['newmetadata']);
         $log->debug("Metadata updated for $video_id: " . ($info->{title} // '?') . " by " . ($info->{artist} // '?'));
     });
 }
@@ -473,21 +496,9 @@ sub getMetadataFor {
 
     my $cached = $_metadata_cache{$vid};
 
-    # If no cache entry, trigger a background fetch
-    unless ($cached) {
-        Plugins::YouTubeMusic::API->getSongInfo($vid, sub {
-            my $info = shift;
-            return unless $info && ref $info eq 'HASH';
-            $_metadata_cache{$vid} = {
-                title    => $info->{title}     || '',
-                artist   => $info->{artist}    || '',
-                album    => $info->{album}     || '',
-                duration => $info->{duration}  || 0,
-                cover    => $info->{thumbnail} || '',
-            };
-            Slim::Control::Request::notifyFromArray(undef, ['newmetadata']);
-        });
-    }
+    # One lookup per track. A cold queue used to fire get_song for every
+    # row at once and exhaust the process file limit.
+    _request_metadata($vid) unless $cached;
 
     my %meta  = (
         title   => ($cached && $cached->{title})  ? $cached->{title}  : "YouTube Music - $vid",
