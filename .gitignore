@@ -12,3 +12,5 @@ Plugins/YouTubeMusic/yt-dlp_macos
 Plugins/YouTubeMusic/Bin/
 *.headers.json
 *.cookies.txt
+browser.json
+lms/
