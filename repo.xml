@@ -1,16 +1,19 @@
 <?xml version="1.0"?>
+<!-- Catalog metadata for scripts/pack-plugin.py. LMS installs should use
+     https://github.com/OXipro/lms-ytm/releases/latest/download/repo.xml
+     SHA and zip URL on that file are written at tag time. -->
 <extensions>
   <details>
     <title lang="EN">YouTube Music for LMS</title>
   </details>
   <plugins>
-    <plugin name="YouTubeMusic" version="1.4.3" minTarget="9.0" maxTarget="*">
+    <plugin name="YouTubeMusic" version="1.4.4" minTarget="9.0" maxTarget="*">
       <title lang="EN">YouTube Music</title>
       <desc lang="EN">Browse, search, and stream YouTube Music. Optional per-player account for library, history, and personalised home.</desc>
-      <changes lang="EN">1.4.3: Refresh on Home. Shelf rows show cover art. History and moods still load when YouTube changes the page.</changes>
+      <changes lang="EN">1.4.4: Little fixes about ytm-api.</changes>
       <creator>schmij97/OXipro</creator>
       <category>musicservices</category>
-      <url>https://github.com/OXipro/lms-ytm/releases/download/v1.4.3/lms-ytm.zip</url>
+      <url>https://github.com/OXipro/lms-ytm/releases/download/v1.4.4/lms-ytm.zip</url>
       <sha>b8b4603615e5c45f9effadc07a092250249b9a5a</sha>
     </plugin>
   </plugins>

@@ -14,3 +14,4 @@ Plugins/YouTubeMusic/Bin/
 *.cookies.txt
 browser.json
 lms/
+dist/

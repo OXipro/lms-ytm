@@ -55,11 +55,17 @@ The app icon is the YouTube Music mark. Menu section icons are the stock LMS fil
 
 Add this repository in LMS under Settings, Plugins, Additional repositories:
 
-`https://raw.githubusercontent.com/OXipro/lms-ytm/main/repo.xml`
+`https://github.com/OXipro/lms-ytm/releases/latest/download/repo.xml`
 
 Install or update YouTube Music from the plugin list, then restart LMS.
 
 You can also copy `Plugins/YouTubeMusic` into the LMS plugins directory and restart LMS.
+
+## Releasing
+
+1. Set `<version>` in `Plugins/YouTubeMusic/install.xml` and the `<changes>` text in `repo.xml`.
+2. Commit, then tag `v` plus that version (`git tag v1.4.4`) and push the tag.
+3. The Release workflow zips `Plugins/YouTubeMusic`, writes `repo.xml` with the zip SHA1, and publishes both on the GitHub release. The zip URL inside `repo.xml` is pinned to that tag so LMS never hashes a different file.
 
 ## License
 
