@@ -431,9 +431,7 @@ sub _top_level {
     if ($has_accounts) {
         push @items, _menu_row(
             $client,
-            $activeName
-                ? cstring($client, 'PLUGIN_YOUTUBEMUSIC_ACTIVE_ACCOUNT', $activeName)
-                : cstring($client, 'PLUGIN_YOUTUBEMUSIC_ACCOUNT_ANON'),
+            $activeName || cstring($client, 'PLUGIN_YOUTUBEMUSIC_ACCOUNT_ANON'),
             \&_account_switcher,
             $icon,
             type => 'link',
@@ -442,8 +440,8 @@ sub _top_level {
 
     push @items, (
         _menu_row($client, cstring($client, 'PLUGIN_YOUTUBEMUSIC_SEARCH'), \&_search_dispatch, '/html/images/search.png', type => 'search', search => ''),
-        _menu_row($client, cstring($client, 'PLUGIN_YOUTUBEMUSIC_HOME'), \&_home_menu, 'plugins/YouTubeMusic/html/images/featured_MTL_icon_home.png', forceRefresh => 1),
-        _menu_row($client, cstring($client, 'PLUGIN_YOUTUBEMUSIC_CHARTS'), \&_charts_menu, 'plugins/YouTubeMusic/html/images/charts_MTL_icon_leaderboard.png', forceRefresh => 1),
+        _menu_row($client, cstring($client, 'PLUGIN_YOUTUBEMUSIC_HOME'), \&_home_menu, 'plugins/YouTubeMusic/html/images/featured_MTL_icon_home.png'),
+        _menu_row($client, cstring($client, 'PLUGIN_YOUTUBEMUSIC_CHARTS'), \&_charts_menu, 'plugins/YouTubeMusic/html/images/charts_MTL_icon_leaderboard.png'),
         _menu_row($client, cstring($client, 'PLUGIN_YOUTUBEMUSIC_NEW_RELEASES'), \&_new_releases_menu, '/html/images/newmusic.png'),
         _menu_row($client, cstring($client, 'PLUGIN_YOUTUBEMUSIC_MOODS'), \&_moods_menu, '/html/images/genres.png'),
         _menu_row($client, cstring($client, 'PLUGIN_YOUTUBEMUSIC_MY_PLAYLISTS'), \&_my_playlists_menu, '/html/images/playlists.png'),
@@ -517,17 +515,6 @@ sub _switch_account {
         } else {
             $prefs->client($client)->set('activeAccount', '-');
         }
-    }
-    my $accounts = $prefs->get('accounts') || {};
-    my $effective = Plugins::YouTubeMusic::API->accountId($client);
-    my $name = ($effective && $accounts->{$effective})
-        ? ($accounts->{$effective}{displayName} || $effective)
-        : cstring($client, 'PLUGIN_YOUTUBEMUSIC_ACCOUNT_ANON');
-    if ($client) {
-        $client->showBriefly({
-            line => [ cstring($client, 'PLUGIN_YOUTUBEMUSIC'), cstring($client, 'PLUGIN_YOUTUBEMUSIC_ACCOUNT_SWITCHED', $name) ],
-            jive => { type => 'popupplay', text => [ cstring($client, 'PLUGIN_YOUTUBEMUSIC_ACCOUNT_SWITCHED', $name) ] },
-        });
     }
     _top_level($client, sub {
         my $feed = shift || {};
@@ -705,7 +692,7 @@ sub _home_menu {
             _section_link($client, $_, '/html/images/albums.png')
         } @$sections;
 
-        $callback->({ items => \@items, forceRefresh => 1 });
+        $callback->({ items => \@items });
     }, $client, $refresh);
 }
 
@@ -725,7 +712,7 @@ sub _charts_menu {
             $row;
         } @$sections;
 
-        $callback->({ items => \@items, forceRefresh => 1 });
+        $callback->({ items => \@items });
     }, $client);
 }
 

@@ -945,6 +945,77 @@ def get_prefetched_path(video_id, tag="default", codec=None):
         except OSError:
             pass
     return None
+
+
+def _serve_complete(handler, path, mime):
+    try:
+        size = os.path.getsize(path) if os.path.exists(path) else 0
+        if size <= 0:
+            return False
+        handler.send_response(200)
+        handler.send_header("Content-Type", mime)
+        handler.send_header("Content-Length", str(size))
+        handler.send_header("Cache-Control", "no-cache")
+        handler.send_header("Connection", "close")
+        handler.end_headers()
+        with open(path, "rb") as handle:
+            while True:
+                chunk = handle.read(65536)
+                if not chunk:
+                    break
+                handler.wfile.write(chunk)
+        return True
+    except (BrokenPipeError, ConnectionResetError):
+        return True
+
+
+def _serve_growing(handler, vid, tmp_path, done_path, mime):
+    try:
+        deadline = time.time() + 25
+        while time.time() < deadline:
+            if os.path.exists(done_path) and os.path.getsize(done_path) > 0:
+                return _serve_complete(handler, done_path, mime)
+            if os.path.exists(tmp_path) and os.path.getsize(tmp_path) > 0:
+                break
+            time.sleep(0.1)
+        if os.path.exists(done_path) and os.path.getsize(done_path) > 0:
+            return _serve_complete(handler, done_path, mime)
+        if not os.path.exists(tmp_path) or os.path.getsize(tmp_path) <= 0:
+            return False
+
+        handler.send_response(200)
+        handler.send_header("Content-Type", mime)
+        handler.send_header("Cache-Control", "no-cache")
+        handler.send_header("Connection", "close")
+        handler.end_headers()
+        position = 0
+        idle = 0
+        while idle < 150:
+            path = done_path if os.path.exists(done_path) else tmp_path
+            chunk = b""
+            if os.path.exists(path):
+                try:
+                    with open(path, "rb") as handle:
+                        handle.seek(position)
+                        chunk = handle.read(65536)
+                except FileNotFoundError:
+                    chunk = b""
+            if chunk:
+                handler.wfile.write(chunk)
+                handler.wfile.flush()
+                position += len(chunk)
+                idle = 0
+                continue
+            if os.path.exists(done_path) and position >= os.path.getsize(done_path):
+                logging.info("Progressive stream complete for %s (%d bytes)", vid, position)
+                return True
+            idle += 1
+            time.sleep(0.1)
+        logging.warning("Stream %s stalled after %d bytes", vid, position)
+        return True
+    except (BrokenPipeError, ConnectionResetError):
+        return True
+
 # Plugin directory — yt-dlp binary stored in Bin/ subdir per LMS convention
 # LMS automatically adds <plugin>/Bin to PATH so it will be found system-wide
 PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -1709,9 +1780,6 @@ def stream_audio(video_id, codec=None, bitrate=None, cookiefile=None):
             "-flags", "low_delay",
             "-probesize", "32768",
             "-analyzeduration", "0",
-            "-reconnect", "1",
-            "-reconnect_streamed", "1",
-            "-reconnect_delay_max", "2",
             "-user_agent", "Mozilla/5.0 (Linux; Android 6.0; Nexus 5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Mobile Safari/537.36",
             "-headers", "Accept: */*\r\nAccept-Language: en-us,en;q=0.5\r\n",
             "-i", audio_url,
@@ -1796,15 +1864,32 @@ def _require_account(name, p):
     return data
 
 
-def _catalog(name, account, *args):
+_FEED_CACHE = {}
+_FEED_TTL = 180
+
+
+def _catalog(name, account, *args, refresh=False):
+    key = (name, account or "", tuple(args))
+    now = time.time()
+    if not refresh:
+        hit = _FEED_CACHE.get(key)
+        if hit and hit[0] > now:
+            return hit[1]
     try:
         import ytm_accounts
         if not ytm_accounts.ready():
             return None
-        return getattr(ytm_accounts, name)(account, *args)
+        result = getattr(ytm_accounts, name)(account, *args)
     except Exception:
         logging.exception("ytmusicapi %s failed", name)
         return None
+    if result is not None:
+        _FEED_CACHE[key] = (now + _FEED_TTL, result)
+        if len(_FEED_CACHE) > 80:
+            for old in list(_FEED_CACHE):
+                if _FEED_CACHE[old][0] <= now:
+                    _FEED_CACHE.pop(old, None)
+    return result
 
 
 def _local_client(handler):
@@ -1934,7 +2019,7 @@ class _Handler(BaseHTTPRequestHandler):
                 account = p("account")
                 if refresh:
                     _CACHE.pop("home", None)
-                data = _catalog("home", account)
+                data = _catalog("home", account, refresh=refresh)
                 # A signed-in home must stay that account's home. The anonymous
                 # browse is a different Quick picks shelf.
                 if account:
@@ -2157,114 +2242,21 @@ class _Handler(BaseHTTPRequestHandler):
                 _codec_name, _fmt, mime = _resolve_codec(codec)
 
                 cached_path = get_prefetched_path(vid, tag, codec)
-                if cached_path:
-                    try:
-                        size = os.path.getsize(cached_path)
-                        self.send_response(200)
-                        self.send_header("Content-Type", mime)
-                        self.send_header("Content-Length", str(size))
-                        self.send_header("Cache-Control", "no-cache")
-                        self.send_header("Connection", "close")
-                        self.end_headers()
-                        with open(cached_path, "rb") as f:
-                            while True:
-                                chunk = f.read(65536)
-                                if not chunk:
-                                    break
-                                self.wfile.write(chunk)
-                        logging.info("Served %s from prefetch cache", vid)
-                        return
-                    except (BrokenPipeError, ConnectionResetError):
-                        logging.info("Client disconnected during cached stream for %s", vid)
-                        return
-                    except Exception:
-                        logging.exception("Cached stream error for %s, falling back to live", vid)
-
-                # Progressive raw streaming: no chunked encoding, raw MP3 bytes
-                tmp_path, done_path = _prefetch_paths(vid, tag, codec)
-                cached = get_prefetched_path(vid, tag, codec)
-                if not cached:
-                    start_prefetch(vid, codec, bitrate, cookiefile, tag)
-                # Send HTTP headers immediately — don't make LMS wait for yt-dlp to start
-                try:
-                    self.send_response(200)
-                    self.send_header("Content-Type", mime)
-                    self.send_header("Cache-Control", "no-cache")
-                    self.send_header("Connection", "close")
-                    self.send_header("icy-metaint", "0")
-                    self.end_headers()
-                    self.wfile.flush()
-                except (BrokenPipeError, ConnectionResetError):
+                if cached_path and _serve_complete(self, cached_path, mime):
+                    logging.info("Served %s from prefetch cache", vid)
                     return
-                # Wait for first bytes — timeout only applies to this initial wait
-                # not to the stream itself (a long song should stream indefinitely)
-                first_byte_deadline = time.time() + 60
-                while time.time() < first_byte_deadline:
-                    if os.path.exists(done_path):
-                        break
-                    if os.path.exists(tmp_path) and os.path.getsize(tmp_path) > 0:
-                        break
-                    time.sleep(0.1)
-                sz = os.path.getsize(tmp_path) if os.path.exists(tmp_path) else 0
-                logging.warning("Starting stream %s with %d bytes buffered", vid, sz)
-                open_path = done_path if os.path.exists(done_path) else tmp_path
-                if not os.path.exists(open_path) or os.path.getsize(open_path) == 0:
-                    logging.warning("Stream %s produced 0 bytes — sending error to trigger skip", vid)
+
+                tmp_path, done_path = _prefetch_paths(vid, tag, codec)
+                if not get_prefetched_path(vid, tag, codec):
+                    start_prefetch(vid, codec, bitrate, cookiefile, tag)
+                if _serve_growing(self, vid, tmp_path, done_path, mime):
+                    return
+                logging.warning("Stream %s produced no audio", vid)
+                if not self.wfile.closed:
                     try:
-                        self.wfile.write(b"\r\n")
-                        self.wfile.flush()
+                        self.send_error(404, "no audio")
                     except Exception:
                         pass
-                    return
-                if os.path.exists(open_path) and os.path.getsize(open_path) > 0:
-                    try:
-                        position = 0
-                        while True:
-                            current = tmp_path if os.path.exists(tmp_path) else done_path
-                            if not os.path.exists(current):
-                                if os.path.exists(done_path):
-                                    break
-                                time.sleep(0.1)
-                                continue
-                            with open(current, "rb") as fp:
-                                fp.seek(position)
-                                chunk = fp.read(65536)
-                            if chunk:
-                                self.wfile.write(chunk)
-                                self.wfile.flush()
-                                position += len(chunk)
-                                continue
-                            if os.path.exists(done_path):
-                                break
-                            time.sleep(0.1)
-                        logging.info("Progressive raw stream complete for %s", vid)
-                        return
-                    except (BrokenPipeError, ConnectionResetError):
-                        return
-                    except Exception:
-                        logging.exception("Progressive stream error for %s", vid)
-                # Fallback: live stream if progressive failed
-                # Fallback: live stream if cache failed
-                # Fallback: live stream if cache failed
-                # Fallback: live stream if cache failed
-                try:
-                    self.send_response(200)
-                    self.send_header("Content-Type", mime)
-                    self.send_header("Transfer-Encoding", "chunked")
-                    self.send_header("Cache-Control", "no-cache")
-                    self.send_header("icy-metaint", "0")
-                    self.end_headers()
-                    for chunk in stream_audio(vid, codec, bitrate, cookiefile):
-                        size_hdr = ("%x\r\n" % len(chunk)).encode()
-                        self.wfile.write(size_hdr)
-                        self.wfile.write(chunk)
-                        self.wfile.write(b"\r\n")
-                    self.wfile.write(b"0\r\n\r\n")
-                    logging.info("Served %s via live stream fallback", vid)
-                except (BrokenPipeError, ConnectionResetError):
-                    return
-                except Exception:
-                    logging.exception("Stream error for %s", vid)
             elif path.startswith("/prefetch/"):
                 vid = path[len("/prefetch/"):]
                 if not vid:

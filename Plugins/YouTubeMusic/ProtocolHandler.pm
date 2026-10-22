@@ -21,6 +21,7 @@ use Scalar::Util       qw(blessed);
 
 use Slim::Utils::Log;
 use Slim::Utils::Prefs;
+use Slim::Music::Info;
 use Slim::Player::ProtocolHandlers;
 use Slim::Player::Source;
 use Slim::Player::Playlist;
@@ -219,7 +220,7 @@ sub getNextTrack {
 
     my $port       = $prefs->get('proxy_port') || 9876;
     my $server_ip  = Slim::Utils::Network::serverAddr() || '127.0.0.1';
-    my $player     = eval { $song->master() };
+    my $player     = eval { $song->master() } || eval { $song->owner() };
     cancel_radio($player) if $player;
     my $query      = Plugins::YouTubeMusic::API->streamQuery($player);
     my $streamUrl  = "http://$server_ip:$port/stream/$vid$query";
@@ -231,9 +232,7 @@ sub getNextTrack {
     $log->info("Routing playback through local proxy: $streamUrl");
 
     $song->streamUrl($streamUrl);
-
-    # Kick off a non-blocking metadata fetch (title/artist/artwork)
-    _fetch_metadata($vid, $song);
+    _fetch_metadata($vid, $song, $player);
     # Start downloading current track NOW before LMS opens the stream
     $log->info("EARLY PREFETCH START $vid");
     Plugins::YouTubeMusic::API->prefetch($vid, sub {}, $player);
@@ -254,80 +253,34 @@ sub _prefetch_with_client {
     my $next_index = $current_index + 1;
     my $count      = eval { Slim::Player::Playlist::count($client) } || 0;
     $log->info("Prefetch: current=$current_index next=$next_index count=$count");
-    if ($next_index >= $count - 2 || ($count - $next_index) <= 2) {
-        my $cur_track = eval { Slim::Player::Playlist::track($client, $current_index) };
-        if ($cur_track) {
-            my $cur_url = eval { $cur_track->url } // '';
-            my ($cur_vid) = $cur_url =~ m{^ytm://([A-Za-z0-9_\-]+)};
-            _start_radio($client, $cur_vid) if $cur_vid && $prefs->get('autoplay') // 1;
+    if ($next_index < $count) {
+        my $next_track = eval { Slim::Player::Playlist::track($client, $next_index) };
+        my $next_url = $next_track ? eval { $next_track->url } : '';
+        my ($next_vid) = ($next_url // '') =~ m{^ytm://([A-Za-z0-9_\-]+)};
+        if ($next_vid) {
+            $log->info("Prefetching next track: $next_vid");
+            Plugins::YouTubeMusic::API->prefetch($next_vid, sub {}, $client);
         }
-        return;
+        my $next2_index = $next_index + 1;
+        if ($next2_index < $count) {
+            my $next2_track = eval { Slim::Player::Playlist::track($client, $next2_index) };
+            my $next2_url = $next2_track ? eval { $next2_track->url } : '';
+            my ($next2_vid) = ($next2_url // '') =~ m{^ytm://([A-Za-z0-9_\-]+)};
+            Plugins::YouTubeMusic::API->prefetch($next2_vid, sub {}, $client) if $next2_vid;
+        }
     }
-    my $next_track = eval { Slim::Player::Playlist::track($client, $next_index) };
-    return unless $next_track;
-    my $next_url = eval { $next_track->url };
-    return unless $next_url;
-    my ($next_vid) = $next_url =~ m{^ytm://([A-Za-z0-9_\-]+)};
-    return unless $next_vid;
-    $log->info("Prefetching next track: $next_vid");
-    Plugins::YouTubeMusic::API->prefetch($next_vid, sub {}, $client);
-    # Also prefetch 2 tracks ahead for smoother progressive serving
-    my $next2_index = $next_index + 1;
-    if ($next2_index < $count) {
-        my $next2_track = eval { Slim::Player::Playlist::track($client, $next2_index) };
-        if ($next2_track) {
-            my $next2_url = eval { $next2_track->url } // '';
-            my ($next2_vid) = $next2_url =~ m{^ytm://([A-Za-z0-9_\-]+)};
-            if ($next2_vid) {
-                $log->info("Prefetching 2 ahead: $next2_vid");
-                Plugins::YouTubeMusic::API->prefetch($next2_vid, sub {}, $client);
-            }
-        }
+    if (($prefs->get('autoplay') // 1) && ($count - $current_index) <= 1) {
+        my $cur_track = eval { Slim::Player::Playlist::track($client, $current_index) };
+        my $cur_url = $cur_track ? eval { $cur_track->url } : '';
+        my ($cur_vid) = ($cur_url // '') =~ m{^ytm://([A-Za-z0-9_\-]+)};
+        _start_radio($client, $cur_vid) if $cur_vid;
     }
 }
 
 sub _prefetch_next_track {
     my ($song) = @_;
-    $log->info("_prefetch_next_track called");
-
-    my $client = eval { $song->master() };
-    unless ($client) { $log->debug("Prefetch: no client"); return; }
-
-    my $current_index = eval { Slim::Player::Source::playingSongIndex($client) };
-    unless (defined $current_index) { $log->debug("Prefetch: no current_index, err=$@"); return; }
-
-    my $next_index = $current_index + 1;
-    my $count      = eval { Slim::Player::Playlist::count($client) } || 0;
-    if ($next_index >= $count - 2 || ($count - $next_index) <= 2) {
-        # Queue is empty — auto-continue with radio based on current track
-        $log->debug("Prefetch: queue empty, starting radio from current track");
-        my $cur_track = eval { Slim::Player::Playlist::track($client, $current_index) };
-        if ($cur_track) {
-            my $cur_url = eval { $cur_track->url } // '';
-            my ($cur_vid) = $cur_url =~ m{^ytm://([A-Za-z0-9_\-]+)};
-            _start_radio($client, $cur_vid) if $cur_vid && $prefs->get('autoplay') // 1;
-        }
-        return;
-    }
-
-    my $next_track = eval { Slim::Player::Playlist::track($client, $next_index) };
-    unless ($next_track) { $log->debug("Prefetch: no next_track at index $next_index, err=$@"); return; }
-
-    my $next_url = eval { $next_track->url };
-    unless ($next_url) { $log->debug("Prefetch: no next_url"); return; }
-
-    $log->debug("Prefetch: next_url is $next_url");
-
-    my ($next_vid) = $next_url =~ m{^ytm://([A-Za-z0-9_\-]+)};
-    unless ($next_vid) { $log->debug("Prefetch: next_url didn't match ytm:// pattern"); return; }
-
-    $log->debug("Prefetching next track: $next_vid");
-    Plugins::YouTubeMusic::API->prefetch($next_vid, sub {
-        my $result = shift;
-        if ($result && ref $result eq 'HASH') {
-            $log->debug("Prefetch status for $next_vid: " . ($result->{status} // 'unknown'));
-        }
-    }, $client);
+    my $client = eval { $song->master() } || eval { $song->owner() };
+    _prefetch_with_client($client) if $client;
 }
 
 # ── Metadata ──────────────────────────────────────────────────────────────────
@@ -340,20 +293,66 @@ my %_metadata_cache;
 my %_metadata_inflight;
 my %_metadata_fail_until;
 
-# Called synchronously by Plugin.pm/PlaylistProtocolHandler.pm with data we
-# already have on hand from search/browse results, so the cache is warm
-# before LMS ever needs it - avoids a placeholder-text flash while the
-# normal async getSongInfo fetch would otherwise still be in flight.
+sub _secs {
+    my ($value) = @_;
+    return 0 unless defined $value && $value ne '';
+    return int($value) if $value =~ /^\d+(?:\.\d+)?$/;
+    if ($value =~ /^(?:(\d+):)?(\d+):(\d+)$/) {
+        return (($1 || 0) * 3600) + ($2 * 60) + $3;
+    }
+    return 0;
+}
+
+sub _cache_ready {
+    my ($video_id) = @_;
+    my $cached = $_metadata_cache{$video_id} or return 0;
+    return $cached->{title} && _secs($cached->{duration}) > 0;
+}
+
+sub _apply_meta {
+    my ($song, $info) = @_;
+    return unless $song && $info && ref $info eq 'HASH';
+    my $track = eval { $song->currentTrack() } or return;
+    $track->title($info->{title}) if $info->{title};
+    my $cover = $info->{cover} || $info->{thumbnail} || '';
+    $track->coverurl($cover) if $cover;
+    my $secs = _secs($info->{duration});
+    if ($secs > 0) {
+        $track->secs($secs);
+        Slim::Music::Info::setDuration($track, $secs);
+        my $stream = eval { $song->streamUrl() };
+        Slim::Music::Info::setDuration($stream, $secs) if $stream;
+        $song->duration($secs);
+        my $client = eval { $song->master() };
+        $client->streamingProgressBar({ url => $stream, duration => $secs }) if $client && $stream;
+    }
+    eval { $track->update() };
+}
+
+sub parseHeaders {
+    my $self = shift;
+    my $ret  = $self->SUPER::parseHeaders(@_);
+    my $song = ${*$self}{'song'};
+    if ($song) {
+        $song->isLive(0);
+        my $url = eval { $song->currentTrack()->url } || '';
+        my ($vid) = $url =~ m{^ytm://([A-Za-z0-9_\-]+)};
+        _apply_meta($song, $_metadata_cache{$vid}) if $vid && $_metadata_cache{$vid};
+    }
+    return $ret;
+}
+
 sub primeMetadata {
     my ($class, $video_id, $info) = @_;
     return unless $video_id && $info;
-
-    $_metadata_cache{$video_id} ||= {
-        title    => $info->{title}     || '',
-        artist   => $info->{artist}    || '',
-        album    => $info->{album}     || '',
-        duration => $info->{duration}  || 0,
-        cover    => $info->{thumbnail} || '',
+    my $cur = $_metadata_cache{$video_id} || {};
+    my $secs = _secs($info->{duration}) || _secs($cur->{duration});
+    $_metadata_cache{$video_id} = {
+        title    => $info->{title}     || $cur->{title} || '',
+        artist   => $info->{artist}    || $cur->{artist} || '',
+        album    => $info->{album}     || $cur->{album} || '',
+        duration => $secs,
+        cover    => $info->{thumbnail} || $info->{cover} || $cur->{cover} || '',
     };
 }
 
@@ -442,20 +441,21 @@ sub _start_radio {
 sub _remember_metadata {
     my ($video_id, $info) = @_;
     return 0 unless $video_id && $info && ref $info eq 'HASH' && ($info->{title} || $info->{artist});
+    my $cur = $_metadata_cache{$video_id} || {};
     $_metadata_cache{$video_id} = {
-        title    => $info->{title}     || '',
-        artist   => $info->{artist}    || '',
-        album    => $info->{album}     || '',
-        duration => $info->{duration}  || 0,
-        cover    => $info->{thumbnail} || '',
+        title    => $info->{title}     || $cur->{title} || '',
+        artist   => $info->{artist}    || $cur->{artist} || '',
+        album    => $info->{album}     || $cur->{album} || '',
+        duration => _secs($info->{duration}) || _secs($cur->{duration}),
+        cover    => $info->{thumbnail} || $info->{cover} || $cur->{cover} || '',
     };
     delete $_metadata_fail_until{$video_id};
     return 1;
 }
 
 sub _request_metadata {
-    my ($video_id, $cb) = @_;
-    return if !$video_id || $_metadata_cache{$video_id};
+    my ($video_id, $cb, $client) = @_;
+    return if !$video_id || _cache_ready($video_id);
     return if $_metadata_inflight{$video_id};
     return if ($_metadata_fail_until{$video_id} || 0) > time();
     $_metadata_inflight{$video_id} = 1;
@@ -464,26 +464,22 @@ sub _request_metadata {
         delete $_metadata_inflight{$video_id};
         unless (_remember_metadata($video_id, $info)) {
             $_metadata_fail_until{$video_id} = time() + 20;
+            $cb->() if $cb;
             return;
         }
-        $cb->($info) if $cb;
+        $cb->($_metadata_cache{$video_id}) if $cb;
         Slim::Control::Request::notifyFromArray(undef, ['newmetadata']);
-    });
+    }, $client);
 }
 
 sub _fetch_metadata {
-    my ($video_id, $song) = @_;
-
+    my ($video_id, $song, $client) = @_;
+    _apply_meta($song, $_metadata_cache{$video_id}) if $_metadata_cache{$video_id};
+    return if _cache_ready($video_id);
     _request_metadata($video_id, sub {
         my $info = shift;
-        my $track = eval { $song->currentTrack() };
-        return unless $track;
-        $track->title($info->{title})        if $info->{title};
-        $track->secs($info->{duration})      if $info->{duration};
-        $track->coverurl($info->{thumbnail}) if $info->{thumbnail};
-        $track->update();
-        $log->debug("Metadata updated for $video_id: " . ($info->{title} // '?') . " by " . ($info->{artist} // '?'));
-    });
+        _apply_meta($song, $info) if $info;
+    }, $client);
 }
 
 # ── getMetadataFor (called when building Now Playing info) ────────────────────
@@ -498,8 +494,10 @@ sub getMetadataFor {
 
     # One lookup per track. A cold queue used to fire get_song for every
     # row at once and exhaust the process file limit.
-    _request_metadata($vid) unless $cached;
+    _request_metadata($vid, undef, $client) unless _cache_ready($vid);
+    $cached = $_metadata_cache{$vid};
 
+    my $secs = $cached ? _secs($cached->{duration}) : 0;
     my %meta  = (
         title   => ($cached && $cached->{title})  ? $cached->{title}  : "YouTube Music - $vid",
         artist  => ($cached && $cached->{artist}) ? $cached->{artist} : '',
@@ -508,7 +506,7 @@ sub getMetadataFor {
                     : Plugins::YouTubeMusic::Plugin->_pluginDataFor('icon'),
         type    => 'YouTube Music',
         bitrate => '192k CBR',
-        duration => ($cached && $cached->{duration}) ? $cached->{duration} : undef,
+        duration => $secs > 0 ? $secs : undef,
     );
 
     return \%meta;

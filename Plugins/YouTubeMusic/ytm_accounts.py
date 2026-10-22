@@ -454,9 +454,12 @@ def _rows_from_home(rows):
     for row in rows or []:
         if not isinstance(row, dict):
             continue
+        title = row.get("title") or "Home"
+        if re.search(r"using\b.+\baccount", title, re.I):
+            title = "Home"
         items = _map_many(row.get("contents") or row.get("items") or [])
         if items:
-            sections.append({"title": row.get("title") or "Home", "items": items})
+            sections.append({"title": title, "items": items})
     return sections
 
 
@@ -681,20 +684,20 @@ def _home_rows(yt, limit=12):
     response = yt._send_request("browse", body)
     rows = []
     seen_tokens = set()
-    for _ in range(6):
+    for _ in range(2):
         section = _section_list(response) or {}
         for entry in section.get("contents") or []:
             row = _row_from_section(entry)
             if row:
                 rows.append(row)
-        if len(rows) >= limit:
+        if len(rows) >= min(limit, 8):
             break
         query = _continuation_query(section)
         if not query or query in seen_tokens:
             break
         seen_tokens.add(query)
         response = yt._send_request("browse", body, query)
-    return rows[:limit]
+    return rows[:8]
 
 
 def home(account_id):
