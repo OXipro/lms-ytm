@@ -172,4 +172,10 @@ sub history {
     _get(_with_account('/history', $client), $cb);
 }
 
+sub accountStatus {
+    my ($class, $account_id, $cb) = @_;
+    return $cb->(undef) unless $account_id;
+    _get('/accounts/status?id=' . uri_escape_utf8($account_id), $cb);
+}
+
 1;

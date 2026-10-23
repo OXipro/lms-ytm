@@ -1854,21 +1854,63 @@ def _playback_from_qs(p):
     return codec, bitrate, account, cookiefile, tag
 
 
+def _account_error(account):
+    try:
+        import ytm_accounts
+        if ytm_accounts.auth_expired(account):
+            return ytm_accounts.AUTH_MESSAGE
+    except Exception:
+        logging.debug("Account status lookup failed", exc_info=True)
+    return "YouTube Music account request failed"
+
+
+def _drop_account_feeds(account):
+    for key in list(_FEED_CACHE):
+        if len(key) > 1 and key[1] == (account or ""):
+            _FEED_CACHE.pop(key, None)
+
+
 def _require_account(name, p):
     account = p("account")
     if not account:
         return {"error": "Sign in on this player to open this menu", "items": []}
     data = _catalog(name, account)
     if data is None:
-        return {"error": "YouTube Music account request failed", "items": []}
+        return {"error": _account_error(account), "items": []}
+    if isinstance(data, dict) and data.get("error"):
+        return data
     return data
 
 
 _FEED_CACHE = {}
 _FEED_TTL = 180
+_AUTH_FEEDS = {
+    "home",
+    "library_playlists",
+    "library_albums",
+    "library_artists",
+    "library_subscriptions",
+    "liked",
+    "history",
+}
 
 
 def _catalog(name, account, *args, refresh=False):
+    if account and name in _AUTH_FEEDS:
+        try:
+            import ytm_accounts
+            status = ytm_accounts.auth_status(account)
+        except Exception:
+            logging.exception("Account status check failed")
+            status = None
+        if status and status.get("authExpired"):
+            _drop_account_feeds(account)
+            return {
+                "error": status.get("error") or ytm_accounts.AUTH_MESSAGE,
+                "authExpired": True,
+                "reason": status.get("reason") or "signed_out",
+                "items": [],
+            }
     key = (name, account or "", tuple(args))
     now = time.time()
     if not refresh:
@@ -1883,6 +1925,10 @@ def _catalog(name, account, *args, refresh=False):
     except Exception:
         logging.exception("ytmusicapi %s failed", name)
         return None
+    if isinstance(result, dict) and result.get("error"):
+        if result.get("authExpired"):
+            _drop_account_feeds(account)
+        return result
     if result is not None:
         _FEED_CACHE[key] = (now + _FEED_TTL, result)
         if len(_FEED_CACHE) > 80:
@@ -2027,7 +2073,9 @@ class _Handler(BaseHTTPRequestHandler):
                 # browse is a different Quick picks shelf.
                 if account:
                     if data is None:
-                        self._send_json({"error": "YouTube Music home failed for this account"})
+                        self._send_json({"error": _account_error(account), "authExpired": False})
+                    elif isinstance(data, dict) and data.get("error"):
+                        self._send_json(data)
                     else:
                         self._send_json(data)
                 else:
@@ -2231,6 +2279,11 @@ class _Handler(BaseHTTPRequestHandler):
                     return self._error("Forbidden", 403)
                 import ytm_accounts
                 self._send_json(ytm_accounts.list_accounts())
+            elif path == "/accounts/status":
+                if not _local_client(self):
+                    return self._error("Forbidden", 403)
+                import ytm_accounts
+                self._send_json(ytm_accounts.auth_status(p("id")))
             elif path == "/accounts/test":
                 if not _local_client(self):
                     return self._error("Forbidden", 403)

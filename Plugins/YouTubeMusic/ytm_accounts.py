@@ -1,3 +1,4 @@
+import hashlib
 import json
 import logging
 import os
@@ -18,6 +19,15 @@ _SONG_CACHE = {}
 _SONG_INFLIGHT = {}
 _SONG_TTL = 6 * 3600
 _SONG_FAIL_TTL = 20
+_AUTH = {}
+_AUTH_TTL = 600
+_AUTH_RETRY = 90
+_MOBILE_HOME = None
+AUTH_MESSAGE = "YouTube Music session expired. Re-import your cookies in Settings."
+
+
+class AuthExpired(Exception):
+    """YouTube returned a signed-out page for an account that should be logged in."""
 
 
 def configure(directory):
@@ -103,12 +113,17 @@ def list_accounts():
     out = []
     for account_id in sorted(index):
         meta = index[account_id] or {}
+        state = _AUTH.get(account_id) or {}
+        expired = bool(state) and not state.get("ok") and state.get("reason") in ("signed_out", "no_auth")
         out.append({
             "id": account_id,
             "name": meta.get("name") or account_id,
             "authUser": meta.get("authUser") or "0",
             "hasCookies": bool(meta.get("hasCookies")) and os.path.isfile(_cookies_path(account_id)),
             "hasAuth": os.path.isfile(_headers_path(account_id)),
+            "authExpired": expired,
+            "authReason": state.get("reason") or "",
+            "accountName": state.get("name") or "",
         })
     return out
 
@@ -183,11 +198,12 @@ def client_for(account_id):
         if cached and cached[0] == mtime:
             return cached[1]
         old = cached
+    _install_auth_hash()
     from ytmusicapi import YTMusic
     index = _read_index()
-    user = (index.get(account_id) or {}).get("authUser") or None
-    if user in ("", "0", 0, None):
-        user = None
+    # onBehalfOfUser is a 21-digit brand-account id. X-Goog-AuthUser (0, 1, …)
+    # is already stored in the headers file and must not be sent as that id.
+    user = _brand_user((index.get(account_id) or {}).get("authUser"))
     yt = YTMusic(path, user=user)
     _tame_session(yt)
     with _LOCK:
@@ -214,6 +230,7 @@ def delete_account(account_id):
             pass
     with _LOCK:
         old = _CLIENTS.pop(account_id, None)
+        _AUTH.pop(account_id, None)
     if old:
         _close_yt(old[1])
     return True
@@ -304,22 +321,24 @@ def import_account(name, auth_user, material):
         "hasCookies": has_cookies,
     }
     _write_index(index)
-    info = {"accountName": "", "channelHandle": ""}
-    try:
-        with _client_lock(account_id):
-            info = client_for(account_id).get_account_info() or info
-    except Exception as exc:
-        logging.warning("Account %s saved but get_account_info failed: %s", account_id, exc)
-        info["warning"] = str(exc)
+    with _LOCK:
+        _AUTH.pop(account_id, None)
+    state = verify_auth(account_id, force=True)
+    warning = ""
+    if not state.get("ok"):
+        warning = AUTH_MESSAGE if state.get("reason") in ("signed_out", "no_auth") else (
+            "Saved the account, but YouTube Music did not answer the session check."
+        )
     return {
         "ok": True,
         "id": account_id,
         "name": index[account_id]["name"],
         "authUser": auth_user,
         "hasCookies": has_cookies,
-        "accountName": info.get("accountName") or "",
-        "channelHandle": info.get("channelHandle") or "",
-        "warning": info.get("warning") or "",
+        "accountName": state.get("name") or "",
+        "channelHandle": state.get("handle") or "",
+        "authExpired": not state.get("ok") and state.get("reason") in ("signed_out", "no_auth"),
+        "warning": warning,
     }
 
 
@@ -485,16 +504,269 @@ def _log_call_failure(exc):
                 "Waiting for the current requests to finish."
             )
         return
-    logging.exception("ytmusicapi call failed")
+    logging.warning("ytmusicapi call failed: %s", _exc_brief(exc))
+    logging.debug("ytmusicapi call failed", exc_info=True)
 
 
-def _call(account_id, fn):
+def _exc_brief(exc):
+    text = str(exc).replace("\n", " ")
+    cut = text.find(" on {")
+    if cut > 0:
+        text = text[:cut]
+    return text[:300]
+
+
+def _exc_is_signed_out(exc):
+    text = str(exc)
+    return (
+        "signInEndpoint" in text
+        or "Sign in" in text
+        or "Looking for what" in text
+    )
+
+
+def _brand_user(value):
+    user = str(value or "").strip()
+    if user.isdigit() and len(user) >= 15:
+        return user
+    return None
+
+
+def _cookie_value(cookie, name):
+    for part in (cookie or "").split(";"):
+        part = part.strip()
+        if part.startswith(name + "="):
+            return part.split("=", 1)[1]
+    return ""
+
+
+def _sapisid_token(secret, origin, timestamp):
+    digest = hashlib.sha1(f"{timestamp} {secret} {origin}".encode()).hexdigest()
+    return timestamp + "_" + digest
+
+
+def _sapisid_authorization(cookie, sapisid, origin):
+    """YouTube rejects a lone SAPISIDHASH on current Music web clients."""
+    timestamp = str(int(time.time()))
+    sid = _cookie_value(cookie, "SAPISID") or sapisid
+    first_party = _cookie_value(cookie, "__Secure-1PAPISID") or sid
+    third_party = _cookie_value(cookie, "__Secure-3PAPISID") or sapisid
+    return " ".join((
+        "SAPISIDHASH " + _sapisid_token(sid, origin, timestamp),
+        "SAPISID1PHASH " + _sapisid_token(first_party, origin, timestamp),
+        "SAPISID3PHASH " + _sapisid_token(third_party, origin, timestamp),
+    ))
+
+
+def _install_auth_hash():
+    """Send the 1P and 3P hashes ytmusicapi still omits."""
+    try:
+        import ytmusicapi.ytmusic as ytm
+    except ImportError:
+        return
+    if getattr(ytm.YTMusic, "_lms_auth_hash", False):
+        return
+    original = ytm.YTMusic.headers.fget
+
+    def headers(self):
+        built = original(self)
+        sapisid = getattr(self, "sapisid", None)
+        origin = getattr(self, "origin", None)
+        if sapisid and origin:
+            cookie = ""
+            try:
+                cookie = self.base_headers.get("cookie") or ""
+            except Exception:
+                cookie = ""
+            built["authorization"] = _sapisid_authorization(cookie, sapisid, origin)
+        return built
+
+    ytm.YTMusic.headers = property(headers)
+    ytm.YTMusic._lms_auth_hash = True
+
+
+def _walk(node, limit=20000):
+    stack = [node]
+    seen = 0
+    while stack:
+        current = stack.pop()
+        seen += 1
+        if seen > limit:
+            break
+        if isinstance(current, dict):
+            yield current
+            stack.extend(current.values())
+        elif isinstance(current, list):
+            stack.extend(current)
+
+
+def _payload_signed_out(node):
+    for current in _walk(node):
+        if "signInEndpoint" in current:
+            return True
+        endpoint = current.get("navigationEndpoint")
+        if isinstance(endpoint, dict) and "signInEndpoint" in endpoint:
+            return True
+    return False
+
+
+def _has_account_menu(node):
+    for current in _walk(node):
+        if "multiPageMenuRenderer" in current:
+            return True
+        if current.get("style") == "MULTI_PAGE_MENU_STYLE_TYPE_ACCOUNT":
+            return True
+    return False
+
+
+def _account_identity(response):
+    name = ""
+    handle = ""
+    for current in _walk(response):
+        header = current.get("activeAccountHeaderRenderer")
+        if not isinstance(header, dict):
+            header = current if "accountName" in current else None
+        if not isinstance(header, dict):
+            continue
+        found = _runs_text(header.get("accountName") or {})
+        if not found:
+            continue
+        name = found
+        handle = _runs_text(header.get("channelHandle") or {}) or handle
+        break
+    return name, handle
+
+
+def _reject_if_signed_out(response, where):
+    if _payload_signed_out(response):
+        raise AuthExpired(where)
+
+
+def _notifier_message(response):
+    messages = []
+    for current in _walk(response):
+        renderer = current.get("messageRenderer") or current.get("musicNotifierShelfRenderer")
+        if not isinstance(renderer, dict):
+            continue
+        text = _runs_text(renderer.get("text") or renderer.get("title") or {})
+        if text and text not in messages:
+            messages.append(text)
+    return "; ".join(messages[:3])
+
+
+def _remember_auth(account_id, ok, reason, name="", handle="", where=""):
+    with _LOCK:
+        prev = _AUTH.get(account_id) or {}
+        changed = prev.get("ok") != ok or prev.get("reason") != reason
+        state = {
+            "at": time.time(),
+            "ok": bool(ok),
+            "reason": reason,
+            "name": name or "",
+            "handle": handle or "",
+        }
+        _AUTH[account_id] = state
+    if changed and account_id:
+        if ok and reason == "ok":
+            logging.info("Account %s session is signed in as %s", account_id, name or "unknown")
+        elif reason == "signed_out":
+            place = f" while loading {where}" if where else ""
+            logging.warning(
+                "Account %s is signed out%s. Home, likes, and history need a fresh cookie import.",
+                account_id,
+                place,
+            )
+        elif reason == "no_auth":
+            logging.warning("Account %s has no saved auth headers", account_id)
+        elif reason == "request_failed":
+            logging.warning("Account %s session check could not reach YouTube Music", account_id)
+    return dict(state)
+
+
+def _note_signed_out(account_id, where):
+    if account_id:
+        _remember_auth(account_id, False, "signed_out", where=where)
+
+
+def auth_expired(account_id):
+    state = _AUTH.get(account_id) or {}
+    return bool(state) and not state.get("ok") and state.get("reason") in ("signed_out", "no_auth")
+
+
+def _auth_payload(reason):
+    expired = reason in ("signed_out", "no_auth")
+    return {
+        "error": AUTH_MESSAGE if expired else "YouTube Music account request failed",
+        "authExpired": expired,
+        "reason": reason,
+        "items": [],
+    }
+
+
+def verify_auth(account_id, force=False):
+    """True when the saved headers still open a signed-in YouTube Music session.
+
+    An expired cookie comes back as the signed-out home and library, with HTTP 200.
+    """
+    if not account_id:
+        return {"ok": True, "reason": "", "name": "", "handle": ""}
+    now = time.time()
+    with _LOCK:
+        state = _AUTH.get(account_id)
+        if state and not force:
+            ttl = _AUTH_TTL if state.get("ok") else _AUTH_RETRY
+            if now - state.get("at", 0) < ttl:
+                return dict(state)
+    if not os.path.isfile(_headers_path(account_id)):
+        return _remember_auth(account_id, False, "no_auth")
+    if not ready():
+        return _remember_auth(account_id, False, "request_failed")
+    try:
+        with _client_lock(account_id):
+            response = client_for(account_id)._send_request("account/account_menu", {})
+    except Exception as exc:
+        logging.warning("Account %s auth check failed: %s", account_id, _exc_brief(exc))
+        return _remember_auth(account_id, False, "request_failed")
+    name, handle = _account_identity(response)
+    if name:
+        return _remember_auth(account_id, True, "ok", name, handle)
+    if _payload_signed_out(response) or _has_account_menu(response):
+        return _remember_auth(account_id, False, "signed_out")
+    keys = list(response)[:8] if isinstance(response, dict) else []
+    logging.warning("Account %s account menu had no name (keys: %s). Not blocking feeds.", account_id, keys)
+    return _remember_auth(account_id, True, "unconfirmed")
+
+
+def auth_status(account_id, force=False):
+    state = verify_auth(account_id, force=force)
+    expired = (not state.get("ok")) and state.get("reason") in ("signed_out", "no_auth")
+    return {
+        "ok": bool(state.get("ok")),
+        "authExpired": expired,
+        "reason": state.get("reason") or "",
+        "accountName": state.get("name") or "",
+        "channelHandle": state.get("handle") or "",
+        "error": AUTH_MESSAGE if expired else "",
+    }
+
+
+def _call(account_id, fn, require_auth=False):
     if not ready():
         return None
+    if require_auth and account_id:
+        state = verify_auth(account_id)
+        if not state.get("ok") and state.get("reason") in ("signed_out", "no_auth"):
+            return _auth_payload(state.get("reason"))
     try:
         with _client_lock(account_id):
             return fn(client_for(account_id))
+    except AuthExpired as exc:
+        _note_signed_out(account_id, str(exc) or "feed")
+        return _auth_payload("signed_out")
     except Exception as exc:
+        if account_id and _exc_is_signed_out(exc):
+            _note_signed_out(account_id, "request")
+            return _auth_payload("signed_out")
         _log_call_failure(exc)
         return None
 
@@ -679,9 +951,40 @@ def _row_from_section(section):
     return {"title": _shelf_title(shelf) or "Home", "contents": items}
 
 
+def _home_via_mobile(yt):
+    """Android Music 7.21.50 is rejected with HTTP 400. Try once, then stay on web."""
+    global _MOBILE_HOME
+    if _MOBILE_HOME is False:
+        return None
+    mobile = getattr(yt, "as_mobile", None)
+    if not mobile:
+        _MOBILE_HOME = False
+        return None
+    try:
+        with mobile():
+            rows = _home_rows(yt, limit=12)
+    except AuthExpired:
+        raise
+    except Exception as exc:
+        brief = _exc_brief(exc)
+        if "400" in brief or "invalid argument" in brief.lower():
+            if _MOBILE_HOME is not False:
+                logging.warning(
+                    "Mobile home is rejected (%s). Later home loads use the web home only.",
+                    brief,
+                )
+            _MOBILE_HOME = False
+        else:
+            logging.warning("Mobile home failed: %s", brief)
+        return None
+    _MOBILE_HOME = True
+    return rows
+
+
 def _home_rows(yt, limit=12):
     body = {"browseId": "FEmusic_home"}
     response = yt._send_request("browse", body)
+    _reject_if_signed_out(response, "home")
     rows = []
     seen_tokens = set()
     for _ in range(2):
@@ -702,23 +1005,19 @@ def _home_rows(yt, limit=12):
 
 def home(account_id):
     def run(yt):
-        rows = None
-        mobile = getattr(yt, "as_mobile", None)
-        if mobile:
-            try:
-                with mobile():
-                    rows = _home_rows(yt, limit=12)
-            except Exception:
-                logging.warning("Mobile home failed, using the web home", exc_info=True)
-                rows = None
+        rows = _home_via_mobile(yt)
         if not rows:
             try:
                 rows = _home_rows(yt, limit=12)
-            except Exception:
-                logging.warning("Home browse failed, using get_home", exc_info=True)
+            except AuthExpired:
+                raise
+            except Exception as exc:
+                logging.warning("Home browse failed, using get_home: %s", _exc_brief(exc))
                 rows = yt.get_home(limit=12)
+        if not rows:
+            logging.warning("Home browse returned no rows for account %s", account_id or "anonymous")
         return _rows_from_home(rows)
-    return _call(account_id, run)
+    return _call(account_id, run, require_auth=bool(account_id))
 
 
 def search(account_id, query, kind):
@@ -916,15 +1215,15 @@ def _library_rows(items, title):
 
 
 def library_playlists(account_id):
-    return _call(account_id, lambda yt: _map_many(yt.get_library_playlists(limit=100)))
+    return _call(account_id, lambda yt: _map_many(yt.get_library_playlists(limit=100)), require_auth=True)
 
 
 def library_albums(account_id):
-    return _call(account_id, lambda yt: _map_many(yt.get_library_albums(limit=100)))
+    return _call(account_id, lambda yt: _map_many(yt.get_library_albums(limit=100)), require_auth=True)
 
 
 def library_artists(account_id):
-    return _call(account_id, lambda yt: _map_many(yt.get_library_artists(limit=100)))
+    return _call(account_id, lambda yt: _map_many(yt.get_library_artists(limit=100)), require_auth=True)
 
 
 def _songs_from_response(response):
@@ -1011,14 +1310,17 @@ def library_subscriptions(account_id):
         items = []
         try:
             items = yt.get_library_subscriptions(limit=100) or []
-        except Exception:
-            logging.warning("get_library_subscriptions failed, reading the subscriptions page", exc_info=True)
+        except Exception as exc:
+            if _exc_is_signed_out(exc):
+                raise AuthExpired("subscriptions") from exc
+            logging.warning("Account %s get_library_subscriptions failed: %s", account_id, _exc_brief(exc))
         mapped = _map_many(items)
         if mapped:
             return mapped
         response = yt._send_request("browse", {"browseId": "FEmusic_library_corpus_artists"})
+        _reject_if_signed_out(response, "subscriptions")
         return _map_many(_artists_from_response(response, limit=100))
-    return _call(account_id, run)
+    return _call(account_id, run, require_auth=True)
 
 
 def _liked_payload(tracks, title):
@@ -1037,15 +1339,24 @@ def liked(account_id):
     def run(yt):
         try:
             data = yt.get_liked_songs(limit=200) or {}
-        except Exception:
-            logging.warning("get_liked_songs failed, reading the liked playlist", exc_info=True)
+        except Exception as exc:
+            if _exc_is_signed_out(exc):
+                raise AuthExpired("liked songs") from exc
+            logging.warning("Account %s get_liked_songs failed: %s", account_id, _exc_brief(exc))
             data = {}
         payload = _liked_payload(data.get("tracks"), data.get("title"))
         if payload["items"]:
             return payload
         response = yt._send_request("browse", {"browseId": "VLLM"})
-        return _liked_payload(_songs_from_response(response), "Liked Songs")
-    return _call(account_id, run)
+        _reject_if_signed_out(response, "liked songs")
+        fallback = _liked_payload(_songs_from_response(response), "Liked Songs")
+        if not fallback["items"]:
+            note = _notifier_message(response)
+            if note and "sign in" in note.lower():
+                raise AuthExpired("liked songs")
+            logging.info("Account %s liked songs is empty%s", account_id, f" ({note})" if note else "")
+        return fallback
+    return _call(account_id, run, require_auth=True)
 
 
 def _runs_text(node):
@@ -1145,15 +1456,26 @@ def history(account_id):
     def run(yt):
         yt._check_auth()
         response = yt._send_request("browse", {"browseId": "FEmusic_history"})
+        _reject_if_signed_out(response, "history")
         items = _map_many(_songs_from_response(response)) or _history_items(response)
         if items:
             return items
+        note = _notifier_message(response)
+        if note and "sign in" in note.lower():
+            raise AuthExpired("history")
         try:
             return _map_many(yt.get_history())
-        except Exception:
-            logging.warning("History browse returned no tracks and get_history failed", exc_info=True)
+        except Exception as exc:
+            if _exc_is_signed_out(exc):
+                raise AuthExpired("history") from exc
+            logging.warning(
+                "Account %s history returned no tracks (%s): %s",
+                account_id,
+                note or "no notice",
+                _exc_brief(exc),
+            )
             return []
-    return _call(account_id, run)
+    return _call(account_id, run, require_auth=True)
 
 
 def radio(account_id, video_id):
@@ -1231,11 +1553,4 @@ def song_info(account_id, video_id):
 
 
 def test_account(account_id):
-    with _client_lock(account_id):
-        yt = client_for(account_id)
-        info = yt.get_account_info()
-    return {
-        "ok": True,
-        "accountName": info.get("accountName") or "",
-        "channelHandle": info.get("channelHandle") or "",
-    }
+    return auth_status(account_id, force=True)

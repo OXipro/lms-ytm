@@ -97,6 +97,9 @@ PLUGIN_YOUTUBEMUSIC_ACCOUNT_SWITCHED
 PLUGIN_YOUTUBEMUSIC_ACCOUNT_REQUIRED
 	EN	Sign in on this player to open this menu
 
+PLUGIN_YOUTUBEMUSIC_AUTH_EXPIRED
+	EN	YouTube Music session expired. Re-import your cookies in Settings.
+
 PLUGIN_YOUTUBEMUSIC_PLAYER_SETTINGS
 	EN	YouTube Music
 
