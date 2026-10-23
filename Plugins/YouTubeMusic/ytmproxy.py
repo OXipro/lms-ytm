@@ -1904,12 +1904,15 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _send_json(self, obj, code=200):
         body = json.dumps(obj, ensure_ascii=False).encode()
-        self.send_response(code)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            logging.debug("Client closed %s before the response was sent", self.path)
 
     def _error(self, msg, code=500):
         self._send_json({"error": msg}, code)
@@ -2270,6 +2273,8 @@ class _Handler(BaseHTTPRequestHandler):
         except urllib.error.HTTPError as exc:
             logging.error("Upstream HTTP %s: %s", exc.code, exc.reason)
             self._error(f"Upstream HTTP {exc.code}: {exc.reason}", 502)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            logging.debug("Client closed %s", self.path)
         except Exception:
             logging.exception("Proxy error on %s", self.path)
             self._error("Internal proxy error", 500)
