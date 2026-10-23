@@ -7,10 +7,10 @@
     <title lang="EN">YouTube Music for LMS</title>
   </details>
   <plugins>
-    <plugin name="YouTubeMusic" version="1.4.5" minTarget="9.0" maxTarget="*">
+    <plugin name="YouTubeMusic" version="1.4.6" minTarget="9.0" maxTarget="*">
       <title lang="EN">YouTube Music</title>
       <desc lang="EN">Browse, search, and stream YouTube Music. Optional per-player account for library, history, and personalised home.</desc>
-      <changes lang="EN">1.4.5: Fix playback progress, next track, and menu speed.</changes>
+      <changes lang="EN">1.4.6: Detect expired YouTube Music sessions and ignore closed player connections.</changes>
       <creator>schmij97/OXipro</creator>
       <category>musicservices</category>
       <url>https://github.com/OXipro/lms-ytm/releases/download/v1.4.4/lms-ytm.zip</url>
