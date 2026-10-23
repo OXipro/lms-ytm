@@ -146,6 +146,7 @@ sub handler {
     $params->{path_node}   = $prefs->get('path_node')   || '';
     $params->{log_path}    = $prefs->get('log_path')    || '';
     $params->{disable_node_worker} = $prefs->get('disable_node_worker') // 0;
+    $params->{pref_disable_node_worker} = $params->{disable_node_worker} ? 1 : 0;
     $params->{shareCookiesWithYtdlp} = $prefs->get('shareCookiesWithYtdlp') ? 1 : 0;
     my $accounts = $prefs->get('accounts') || {};
     my @accountList;
