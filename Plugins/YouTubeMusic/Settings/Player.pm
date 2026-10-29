@@ -4,6 +4,7 @@ use strict;
 use warnings;
 use base qw(Slim::Web::Settings);
 
+use URI::Escape ();
 use Slim::Utils::Prefs;
 
 use constant SETTINGS_URL => 'plugins/YouTubeMusic/settings/player.html';
@@ -41,9 +42,15 @@ sub handler {
 
     if ($client) {
         my $stored = $prefs->get('accounts') || {};
+        my $index = Plugins::YouTubeMusic::Plugin->accountIndex();
         my @accountList;
         for my $id (sort keys %{$stored}) {
-            push @accountList, { id => $id, name => $stored->{$id}{displayName} || $id };
+            my $photo = ($index->{$id} || {})->{photo} || '';
+            push @accountList, {
+                id       => $id,
+                name     => $stored->{$id}{displayName} || $id,
+                photoSrc => $photo ? '/imageproxy/' . URI::Escape::uri_escape_utf8($photo) . '/48x48.jpg' : '',
+            };
         }
         $paramRef->{accountList} = \@accountList;
         $paramRef->{activeAccount} = $prefs->client($client)->get('activeAccount');

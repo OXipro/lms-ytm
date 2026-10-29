@@ -3,7 +3,7 @@ package Plugins::YouTubeMusic::API;
 use strict;
 use warnings;
 
-use JSON::XS          qw(decode_json);
+use JSON::XS          qw(decode_json encode_json);
 use Scalar::Util      qw(blessed);
 use URI::Escape       qw(uri_escape_utf8);
 
@@ -176,6 +176,106 @@ sub accountStatus {
     my ($class, $account_id, $cb) = @_;
     return $cb->(undef) unless $account_id;
     _get('/accounts/status?id=' . uri_escape_utf8($account_id), $cb);
+}
+
+sub _post {
+    my ($path, $body, $cb) = @_;
+    my $url = _proxy_url() . $path;
+    my $json = encode_json($body);
+    Slim::Networking::SimpleAsyncHTTP->new(
+        sub {
+            my $http = shift;
+            my $data = eval { decode_json($http->content) };
+            $cb->($@ ? undef : $data);
+        },
+        sub {
+            my ($http, $err) = @_;
+            $log->error("Proxy request failed ($url): $err");
+            $cb->(undef);
+        },
+        { timeout => 30 }
+    )->post($url, 'Content-Type' => 'application/json', $json);
+}
+
+sub _account_body {
+    my ($class, $client, %fields) = @_;
+    return {
+        account => $class->accountId($client),
+        %fields,
+    };
+}
+
+sub songRating {
+    my ($class, $video_id, $cb, $client) = @_;
+    _get(_with_account('/library/rating?videoId=' . uri_escape_utf8($video_id), $client), $cb);
+}
+
+sub rateSong {
+    my ($class, $video_id, $rating, $cb, $client) = @_;
+    _post('/library/rate', $class->_account_body($client, videoId => $video_id, rating => $rating), $cb);
+}
+
+sub artistSubscribed {
+    my ($class, $channel_id, $cb, $client) = @_;
+    _get(_with_account('/library/subscribed?channelId=' . uri_escape_utf8($channel_id), $client), $cb);
+}
+
+sub setSubscription {
+    my ($class, $channel_id, $subscribed, $cb, $client) = @_;
+    _post('/library/subscribe', $class->_account_body($client, channelId => $channel_id, subscribed => $subscribed ? JSON::XS::true : JSON::XS::false), $cb);
+}
+
+sub savePlaylist {
+    my ($class, $playlist_id, $browse_id, $rating, $cb, $client) = @_;
+    _post('/library/save', $class->_account_body($client,
+        playlistId => $playlist_id || '',
+        browseId   => $browse_id || '',
+        rating     => $rating,
+    ), $cb);
+}
+
+sub addToPlaylist {
+    my ($class, $playlist_id, $video_id, $cb, $client) = @_;
+    _post('/library/playlist/add', $class->_account_body($client, playlistId => $playlist_id, videoId => $video_id), $cb);
+}
+
+sub createPlaylist {
+    my ($class, $title, $video_ids, $cb, $client) = @_;
+    _post('/library/playlist/create', $class->_account_body($client, title => $title, videoIds => $video_ids || []), $cb);
+}
+
+sub removeFromPlaylist {
+    my ($class, $playlist_id, $video_id, $set_video_id, $cb, $client) = @_;
+    _post('/library/playlist/remove', $class->_account_body($client,
+        playlistId => $playlist_id,
+        videoId    => $video_id,
+        setVideoId => $set_video_id,
+    ), $cb);
+}
+
+sub deletePlaylist {
+    my ($class, $playlist_id, $cb, $client) = @_;
+    _post('/library/playlist/delete', $class->_account_body($client, playlistId => $playlist_id), $cb);
+}
+
+sub searchSuggestions {
+    my ($class, $query, $cb, $client) = @_;
+    _get(_with_account('/search/suggestions?q=' . uri_escape_utf8($query // ''), $client), $cb);
+}
+
+sub forgetSearch {
+    my ($class, $token, $cb, $client) = @_;
+    _post('/search/forget', $class->_account_body($client, feedbackToken => $token), $cb);
+}
+
+sub addHistory {
+    my ($class, $video_id, $cb, $client) = @_;
+    _post('/history/add', $class->_account_body($client, videoId => $video_id), $cb);
+}
+
+sub removeHistory {
+    my ($class, $token, $cb, $client) = @_;
+    _post('/history/remove', $class->_account_body($client, feedbackToken => $token), $cb);
 }
 
 1;

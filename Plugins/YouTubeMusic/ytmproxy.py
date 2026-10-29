@@ -1870,6 +1870,12 @@ def _drop_account_feeds(account):
             _FEED_CACHE.pop(key, None)
 
 
+def _library_result(account, result):
+    if result is None:
+        return {"ok": False, "error": _account_error(account)}
+    return result
+
+
 def _require_account(name, p):
     account = p("account")
     if not account:
@@ -1986,6 +1992,39 @@ class _Handler(BaseHTTPRequestHandler):
             elif path == "/accounts/delete":
                 ok = ytm_accounts.delete_account(payload.get("id") or "")
                 self._send_json({"ok": ok})
+            elif path.startswith("/library/") or path.startswith("/history/") or path == "/search/forget":
+                account = payload.get("account") or ""
+                if not account:
+                    return self._error("Sign in on this player to open this menu", 400)
+                if path == "/library/rate":
+                    result = ytm_accounts.rate_song(account, payload.get("videoId") or "", payload.get("rating") or "")
+                elif path == "/library/subscribe":
+                    result = ytm_accounts.set_subscription(account, payload.get("channelId") or "", bool(payload.get("subscribed")))
+                elif path == "/library/save":
+                    result = ytm_accounts.save_playlist(
+                        account, payload.get("playlistId") or "", payload.get("browseId") or "", payload.get("rating") or "LIKE",
+                    )
+                elif path == "/library/playlist/add":
+                    result = ytm_accounts.add_to_playlist(account, payload.get("playlistId") or "", payload.get("videoId") or "")
+                elif path == "/library/playlist/create":
+                    result = ytm_accounts.create_playlist(account, payload.get("title") or "", payload.get("videoIds") or [])
+                elif path == "/library/playlist/remove":
+                    result = ytm_accounts.remove_from_playlist(
+                        account, payload.get("playlistId") or "", payload.get("videoId") or "", payload.get("setVideoId") or "",
+                    )
+                elif path == "/library/playlist/delete":
+                    result = ytm_accounts.delete_playlist(account, payload.get("playlistId") or "")
+                elif path == "/history/add":
+                    result = ytm_accounts.add_history(account, payload.get("videoId") or "")
+                elif path == "/history/remove":
+                    result = ytm_accounts.remove_history(account, payload.get("feedbackToken") or "")
+                elif path == "/search/forget":
+                    result = ytm_accounts.remove_search_suggestion(account, payload.get("feedbackToken") or "")
+                else:
+                    return self._error("Unknown endpoint", 404)
+                if isinstance(result, dict) and result.get("ok"):
+                    _drop_account_feeds(account)
+                self._send_json(_library_result(account, result))
             else:
                 self._error("Unknown endpoint", 404)
         except Exception as exc:
@@ -2274,6 +2313,15 @@ class _Handler(BaseHTTPRequestHandler):
                 self._send_json(_require_account("liked", p))
             elif path == "/history":
                 self._send_json(_require_account("history", p))
+            elif path == "/library/rating":
+                import ytm_accounts
+                self._send_json(_library_result(p("account"), ytm_accounts.song_rating(p("account"), p("videoId"))))
+            elif path == "/library/subscribed":
+                import ytm_accounts
+                self._send_json(_library_result(p("account"), ytm_accounts.artist_subscribed(p("account"), p("channelId"))))
+            elif path == "/search/suggestions":
+                import ytm_accounts
+                self._send_json(_library_result(p("account"), ytm_accounts.search_suggestions(p("account"), p("q"))))
             elif path == "/accounts":
                 if not _local_client(self):
                     return self._error("Forbidden", 403)

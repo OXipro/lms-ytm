@@ -4,6 +4,8 @@ use strict;
 use warnings;
 use base qw(Slim::Web::Settings);
 
+use URI::Escape ();
+
 use HTTP::Request;
 use Slim::Utils::Log;
 use Slim::Utils::Prefs;
@@ -149,12 +151,16 @@ sub handler {
     $params->{pref_disable_node_worker} = $params->{disable_node_worker} ? 1 : 0;
     $params->{shareCookiesWithYtdlp} = $prefs->get('shareCookiesWithYtdlp') ? 1 : 0;
     my $accounts = $prefs->get('accounts') || {};
+    my $index = Plugins::YouTubeMusic::Plugin->accountIndex();
     my @accountList;
     for my $id (sort keys %{$accounts}) {
+        my $photo = ($index->{$id} || {})->{photo} || '';
         push @accountList, {
-            id      => $id,
-            name    => $accounts->{$id}{displayName} || $id,
-            channel => $accounts->{$id}{channel} || '',
+            id       => $id,
+            name     => $accounts->{$id}{displayName} || $id,
+            channel  => $accounts->{$id}{channel} || '',
+            photo    => $photo,
+            photoSrc => $photo ? '/imageproxy/' . URI::Escape::uri_escape_utf8($photo) . '/48x48.jpg' : '',
         };
     }
     $params->{accountList} = \@accountList;

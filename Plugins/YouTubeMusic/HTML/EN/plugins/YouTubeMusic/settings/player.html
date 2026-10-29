@@ -1,13 +1,23 @@
 [% PROCESS settings/header.html %]
 
 	[% WRAPPER setting title="PLUGIN_YOUTUBEMUSIC_PLAYER_ACCOUNT" desc="PLUGIN_YOUTUBEMUSIC_PLAYER_ACCOUNT_DESC" %]
-		<select class="stdedit" name="pref_activeAccount" id="pref_activeAccount">
-			<option value="" [% IF activeAccount == '' %]selected[% END %]>[% 'PLUGIN_YOUTUBEMUSIC_PLAYER_ACCOUNT_DEFAULT' | string %]</option>
-			<option value="-" [% IF activeAccount == '-' %]selected[% END %]>[% 'PLUGIN_YOUTUBEMUSIC_ACCOUNT_ANON' | string %]</option>
-			[% FOREACH account IN accountList %]
-			<option value="[% account.id | html %]" [% IF activeAccount == account.id %]selected[% END %]>[% account.name | html %]</option>
+		<label style="display:flex;align-items:center;gap:8px;margin:6px 0;">
+			<input type="radio" name="pref_activeAccount" value="" [% IF activeAccount == '' %]checked[% END %] />
+			[% 'PLUGIN_YOUTUBEMUSIC_PLAYER_ACCOUNT_DEFAULT' | string %]
+		</label>
+		<label style="display:flex;align-items:center;gap:8px;margin:6px 0;">
+			<input type="radio" name="pref_activeAccount" value="-" [% IF activeAccount == '-' %]checked[% END %] />
+			[% 'PLUGIN_YOUTUBEMUSIC_ACCOUNT_ANON' | string %]
+		</label>
+		[% FOREACH account IN accountList %]
+		<label style="display:flex;align-items:center;gap:8px;margin:6px 0;">
+			<input type="radio" name="pref_activeAccount" value="[% account.id | html %]" [% IF activeAccount == account.id %]checked[% END %] />
+			[% IF account.photoSrc %]
+			<img src="[% account.photoSrc | html %]" width="36" height="36" alt="" style="border-radius:50%;object-fit:cover;" />
 			[% END %]
-		</select>
+			<span>[% account.name | html %]</span>
+		</label>
+		[% END %]
 	[% END %]
 
 	[% WRAPPER setting title="PLUGIN_YOUTUBEMUSIC_STREAM_FORMAT" desc="PLUGIN_YOUTUBEMUSIC_STREAM_FORMAT_DESC" %]

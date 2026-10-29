@@ -7,14 +7,18 @@ use base qw(Slim::Plugin::OPMLBased);
 
 use POSIX          qw(SIGTERM);
 use File::Spec     ();
-use File::Spec::Functions qw(catdir);
+use File::Spec::Functions qw(catdir catfile);
 use Scalar::Util   qw(blessed);
+use URI::Escape    qw(uri_unescape uri_escape_utf8);
 
+use JSON::XS       qw(decode_json);
 use Slim::Utils::Log;
 use Slim::Menu::GlobalSearch;
 use Slim::Utils::Prefs;
 use Slim::Utils::Strings qw(cstring string);
 use Slim::Player::ProtocolHandlers;
+use Slim::Web::Graphics;
+use Slim::Web::ImageProxy;
 
 use Plugins::YouTubeMusic::API;
 use Plugins::YouTubeMusic::PlaylistProtocolHandler;
@@ -57,6 +61,15 @@ sub initPlugin {
     Slim::Player::ProtocolHandlers->registerHandler(
         'ytmplaylist', 'Plugins::YouTubeMusic::PlaylistProtocolHandler'
     );
+    Slim::Web::ImageProxy->registerHandler(
+        match => qr{(?:googleusercontent|ggpht|ytimg)\.com},
+        func  => \&_artwork_url,
+    );
+    require Slim::Menu::TrackInfo;
+    Slim::Menu::TrackInfo->registerInfoProvider(youtubemusicTrackInfo => (
+        after => 'top',
+        func  => \&trackInfoMenu,
+    ));
     # Handle real YouTube Music URLs pasted directly into LMS
 
 
@@ -81,6 +94,8 @@ sub initPlugin {
 
 sub shutdownPlugin {
     my $class = shift;
+    Slim::Control::Request::unsubscribe(\&_on_playlist_stop);
+    Slim::Control::Request::unsubscribe(\&_on_newsong);
     if ($PROXY_PID) {
         $log->info("Stopping YouTube Music proxy (PID $PROXY_PID)");
         if ($^O eq 'MSWin32') {
@@ -101,6 +116,56 @@ sub accountsDir {
     my $dir = catdir(Slim::Utils::Prefs::dir(), 'plugin', 'youtubemusic');
     mkdir $dir unless -d $dir;
     return $dir;
+}
+
+sub accountIndex {
+    my $path = catfile(__PACKAGE__->accountsDir(), 'index.json');
+    return {} unless -f $path;
+    open my $fh, '<:utf8', $path or return {};
+    local $/;
+    my $raw = <$fh>;
+    close $fh;
+    my $data = eval { decode_json($raw || '') };
+    return ref $data eq 'HASH' ? $data : {};
+}
+
+sub accountPhoto {
+    my ($class, $id) = @_;
+    return '' unless $id;
+    my $meta = $class->accountIndex()->{$id} || {};
+    return $meta->{photo} || '';
+}
+
+sub _artwork_url {
+    my ($url, $spec) = @_;
+    $url = uri_unescape($url || '');
+    my ($width, $height) = Slim::Web::Graphics->parseSpec($spec || '');
+    $width = 0 if !$width || $width eq 'X';
+    $height = 0 if !$height || $height eq 'X';
+    my $px = $width > $height ? $width : $height;
+    $px ||= 640;
+    $px = 1280 if $px > 1280;
+
+    if ($url =~ m{i\.ytimg\.com/.*/([A-Za-z0-9_-]{6,})/}) {
+        my $id = $1;
+        my $name = Slim::Web::ImageProxy->getRightSize("${px}x${px}", {
+            120  => 'default',
+            320  => 'mqdefault',
+            480  => 'hqdefault',
+            640  => 'sddefault',
+            1280 => 'sddefault',
+        }) || 'sddefault';
+        return "https://i.ytimg.com/vi/$id/$name.jpg";
+    }
+
+    if ($url =~ /=w\d+-h\d+/) {
+        $url =~ s/=w\d+-h\d+/=w${px}-h${px}/;
+    } elsif ($url =~ /=s\d+/) {
+        $url =~ s/=s\d+/=s${px}/;
+    } else {
+        $url =~ s/(\?.*)?$/=w${px}-h${px}-l90$1/;
+    }
+    return $url;
 }
 
 sub _write_share_flag {
@@ -360,6 +425,10 @@ sub postinitPlugin {
         \&_on_playlist_stop,
         [['playlist'], ['stop']]
     );
+    Slim::Control::Request::subscribe(
+        \&_on_newsong,
+        [['playlist'], ['newsong']]
+    );
 }
 
 
@@ -458,7 +527,7 @@ sub _top_level {
         }
 
         push @items, (
-            _menu_row($client, cstring($client, 'PLUGIN_YOUTUBEMUSIC_SEARCH'), \&_search_dispatch, '/html/images/search.png', type => 'search', search => ''),
+            _menu_row($client, cstring($client, 'PLUGIN_YOUTUBEMUSIC_SEARCH'), \&_search_dispatch, '/html/images/search.png', type => 'search'),
             _menu_row($client, cstring($client, 'PLUGIN_YOUTUBEMUSIC_HOME'), \&_home_menu, 'plugins/YouTubeMusic/html/images/featured_MTL_icon_home.png'),
             _menu_row($client, cstring($client, 'PLUGIN_YOUTUBEMUSIC_CHARTS'), \&_charts_menu, 'plugins/YouTubeMusic/html/images/charts_MTL_icon_leaderboard.png'),
             _menu_row($client, cstring($client, 'PLUGIN_YOUTUBEMUSIC_NEW_RELEASES'), \&_new_releases_menu, '/html/images/newmusic.png'),
@@ -472,6 +541,7 @@ sub _top_level {
             splice @items, $insert_at, 0, (
                 _menu_row($client, cstring($client, 'PLUGIN_YOUTUBEMUSIC_LIBRARY'), \&_library_menu, '/html/images/musicfolder.png'),
                 _menu_row($client, cstring($client, 'PLUGIN_YOUTUBEMUSIC_HISTORY'), \&_history_menu, '/html/images/years.png'),
+                _menu_row($client, cstring($client, 'PLUGIN_YOUTUBEMUSIC_RECENT_SEARCHES'), \&_search_history, '/html/images/search.png'),
             );
         }
 
@@ -518,11 +588,12 @@ sub _account_switcher {
     });
     for my $id (sort keys %{$accounts}) {
         my $name = $accounts->{$id}{displayName} || $id;
+        my $photo = __PACKAGE__->accountPhoto($id);
         push @items, {
             name        => $name . ($raw eq $id ? ' *' : ''),
             url         => \&_switch_account,
             passthrough => [{ accountId => $id }],
-            icon        => $icon,
+            $photo ? (image => $photo) : (icon => $icon),
             type        => 'link',
         };
     }
@@ -561,6 +632,12 @@ sub _library_menu {
         _menu_row($client, cstring($client, 'PLUGIN_YOUTUBEMUSIC_ALBUMS'), sub { _library_list('albums', @_) }, '/html/images/albums.png'),
         _menu_row($client, cstring($client, 'PLUGIN_YOUTUBEMUSIC_ARTISTS'), sub { _library_list('artists', @_) }, '/html/images/artists.png'),
         _menu_row($client, cstring($client, 'PLUGIN_YOUTUBEMUSIC_SUBSCRIPTIONS'), sub { _library_list('subscriptions', @_) }, '/html/images/artists.png'),
+        {
+            name => cstring($client, 'PLUGIN_YOUTUBEMUSIC_SAVE_QUEUE'),
+            icon => '/html/images/playlists.png',
+            url  => \&_save_queue,
+            type => 'search',
+        },
     ] });
 }
 
@@ -628,13 +705,12 @@ sub _history_menu {
 }
 
 sub _search_dispatch {
-    my ($client, $callback, $args) = @_;
+    my ($client, $callback, $args, $pt) = @_;
 
-    my $query = $args->{search} // '';
+    my $query = ($pt && $pt->{query}) || ($args->{search} // '');
 
     unless ($query) {
-        $callback->({ items => [] });
-        return;
+        return _search_history($client, $callback);
     }
 
     my @type_menus = map {
@@ -876,6 +952,15 @@ sub _artist_menu {
             }
         } @{ $data->{sections} // [] };
 
+        if (Plugins::YouTubeMusic::API->accountId($client) && $params->{browseId}) {
+            unshift @items, {
+                name        => cstring($client, 'PLUGIN_YOUTUBEMUSIC_SUBSCRIBE'),
+                url         => \&_subscribe_menu,
+                passthrough => [{ channelId => $params->{browseId} }],
+                type        => 'link',
+            };
+        }
+
         $callback->({ items => \@items });
     }, $client);
 }
@@ -909,7 +994,12 @@ my $type = $params->{browse_type} // 'playlist';
             $prefetched++;
         }
 
-        $callback->({ items => _items_to_menu($client, $items, { playall => 1 }), playall => 1 });
+        my @menu = @{ _items_to_menu($client, $items, {
+            playall    => 1,
+            playlistId => $params->{playlistId} || $params->{browseId} || '',
+        }) };
+        unshift @menu, _library_actions($client, $params);
+        $callback->({ items => \@menu, playall => 1 });
     }, $client);
 }
 
@@ -931,7 +1021,7 @@ sub _items_to_menu {
         if ($type eq 'song' && $item->{videoId}) {
             my $ytm_url = "ytm://$item->{videoId}";
             Plugins::YouTubeMusic::ProtocolHandler->primeMetadata($item->{videoId}, $item);
-            push @menu, {
+            my %song = (
                 name      => $item->{title}  || 'Unknown',
                 line2     => _song_line2($item),
                 url       => $ytm_url,
@@ -941,7 +1031,30 @@ sub _items_to_menu {
                 type      => 'audio',
                 on_select => 'play',
                 $playall ? ( playall => 1 ) : (),
-            };
+            );
+            my @actions = _track_actions($client, $item->{videoId});
+            if ($opts->{playlistId} && $item->{setVideoId}) {
+                push @actions, {
+                    name        => cstring($client, 'PLUGIN_YOUTUBEMUSIC_REMOVE_TRACK'),
+                    url         => \&_remove_track,
+                    passthrough => [{
+                        playlistId => $opts->{playlistId},
+                        videoId    => $item->{videoId},
+                        setVideoId => $item->{setVideoId},
+                    }],
+                    type        => 'link',
+                };
+            }
+            if ($item->{feedbackToken}) {
+                push @actions, {
+                    name        => cstring($client, 'PLUGIN_YOUTUBEMUSIC_REMOVE_HISTORY'),
+                    url         => \&_remove_history,
+                    passthrough => [{ feedbackToken => $item->{feedbackToken} }],
+                    type        => 'link',
+                };
+            }
+            $song{items} = \@actions if @actions;
+            push @menu, \%song;
         }
         elsif ($type eq 'album' && $item->{browseId}) {
             push @menu, {
@@ -952,7 +1065,12 @@ sub _items_to_menu {
                 url         => \&_playlist_menu,
                 play        => "ytmplaylist://$item->{browseId}",
                 type        => 'playlist',
-                passthrough => [{ browseId => $item->{browseId}, browse_type => 'album', album_title => $item->{title} }],
+                passthrough => [{
+                    browseId    => $item->{browseId},
+                    playlistId  => $item->{playlistId} || '',
+                    browse_type => 'album',
+                    album_title => $item->{title},
+                }],
             };
         }
         elsif ($type eq 'artist' && $item->{browseId}) {
@@ -973,7 +1091,11 @@ sub _items_to_menu {
                 url         => \&_playlist_menu,
                 play        => "ytmplaylist://$item->{browseId}",
                 type        => 'playlist',
-                passthrough => [{ browseId => $item->{browseId}, browse_type => 'playlist' }],
+                passthrough => [{
+                    browseId    => $item->{browseId},
+                    playlistId  => $item->{playlistId} || '',
+                    browse_type => 'playlist',
+                }],
             };
         }
         elsif ($item->{browseId}) {
@@ -983,7 +1105,11 @@ sub _items_to_menu {
                 line2       => $item->{subtitle} || '',
                 image       => $item->{thumbnail} || '',
                 url         => ($btype eq 'artist') ? \&_artist_menu : \&_playlist_menu,
-                passthrough => [{ browseId => $item->{browseId}, browse_type => $btype }],
+                passthrough => [{
+                    browseId    => $item->{browseId},
+                    playlistId  => $item->{playlistId} || '',
+                    browse_type => $btype,
+                }],
             );
             unless ($btype eq 'artist') {
                 $entry{play} = "ytmplaylist://$item->{browseId}";
@@ -994,7 +1120,7 @@ sub _items_to_menu {
         elsif ($item->{videoId}) {
             my $ytm_url = "ytm://$item->{videoId}";
             Plugins::YouTubeMusic::ProtocolHandler->primeMetadata($item->{videoId}, $item);
-            push @menu, {
+            my %song = (
                 name      => $item->{title}    || 'Unknown',
                 line2     => $item->{subtitle} || '',
                 url       => $ytm_url,
@@ -1003,7 +1129,10 @@ sub _items_to_menu {
                 type      => 'audio',
                 on_select => 'play',
                 $playall ? ( playall => 1 ) : (),
-            };
+            );
+            my @actions = _track_actions($client, $item->{videoId});
+            $song{items} = \@actions if @actions;
+            push @menu, \%song;
         }
     }
 
@@ -1017,6 +1146,304 @@ sub _song_line2 {
         $item->{album}    || '',
         $item->{duration} || '',
     );
+}
+
+sub _on_newsong {
+    my $request = shift;
+    my $client = $request->client() or return;
+    return unless Plugins::YouTubeMusic::API->accountId($client);
+    my $song = eval { Slim::Player::Playlist::song($client) };
+    my $track = $song && eval { $song->currentTrack() };
+    my $url = $track ? ($track->url || '') : '';
+    my ($video_id) = $url =~ m{^ytm://([A-Za-z0-9_-]+)};
+    return unless $video_id;
+    Plugins::YouTubeMusic::API->addHistory($video_id, sub {}, $client);
+}
+
+sub trackInfoMenu {
+    my ($client, $url) = @_;
+    my ($video_id) = ($url || '') =~ m{^ytm://([A-Za-z0-9_-]+)};
+    return unless $video_id;
+    my @items = _track_actions($client, $video_id);
+    return @items ? \@items : undef;
+}
+
+sub _track_actions {
+    my ($client, $video_id) = @_;
+    return () unless $video_id && Plugins::YouTubeMusic::API->accountId($client);
+    return (
+        {
+            name        => cstring($client, 'PLUGIN_YOUTUBEMUSIC_LIKE'),
+            url         => \&_like_menu,
+            passthrough => [{ videoId => $video_id }],
+            type        => 'link',
+        },
+        {
+            name        => cstring($client, 'PLUGIN_YOUTUBEMUSIC_ADD_TO_PLAYLIST'),
+            url         => \&_playlist_picker,
+            passthrough => [{ videoId => $video_id }],
+            type        => 'link',
+        },
+    );
+}
+
+sub _library_actions {
+    my ($client, $params) = @_;
+    return () unless $params && Plugins::YouTubeMusic::API->accountId($client);
+    my $browse = $params->{browseId} || '';
+    my $pid = $params->{playlistId} || '';
+    return () unless $browse || $pid;
+    my $kind = $params->{browse_type} || 'playlist';
+    my $pass = { browseId => $browse, playlistId => $pid, kind => $kind };
+    my @items = (
+        {
+            name        => cstring($client, 'PLUGIN_YOUTUBEMUSIC_SAVE_LIBRARY'),
+            url         => \&_save_library,
+            passthrough => [{ %{$pass}, rating => 'LIKE' }],
+            type        => 'link',
+        },
+        {
+            name        => cstring($client, 'PLUGIN_YOUTUBEMUSIC_REMOVE_LIBRARY'),
+            url         => \&_save_library,
+            passthrough => [{ %{$pass}, rating => 'INDIFFERENT' }],
+            type        => 'link',
+        },
+    );
+    if ($kind eq 'playlist') {
+        push @items, {
+            name        => cstring($client, 'PLUGIN_YOUTUBEMUSIC_DELETE_PLAYLIST'),
+            url         => \&_delete_playlist,
+            passthrough => [ $pass ],
+            type        => 'link',
+        };
+    }
+    return @items;
+}
+
+sub _action_done {
+    my ($client, $cb, $data, $ok_key) = @_;
+    my $failed = !$data || ref $data ne 'HASH' || !$data->{ok};
+    if ($failed) {
+        my $msg = (ref $data eq 'HASH' && $data->{error})
+            ? $data->{error}
+            : cstring($client, 'PLUGIN_YOUTUBEMUSIC_ACTION_FAILED');
+        return $cb->({ items => [{ name => $msg, type => 'text' }] });
+    }
+    my $text = cstring($client, $ok_key);
+    $client->showBriefly({
+        jive => { type => 'popupplay', text => [ $text ] },
+    }) if $client;
+    $cb->({ items => [{ name => $text, nextWindow => 'grandparent' }] });
+}
+
+sub _like_menu {
+    my ($client, $cb, $args, $pt) = @_;
+    $pt = {} unless ref $pt eq 'HASH';
+    my $video_id = $pt->{videoId} || '';
+    return unless $video_id;
+    Plugins::YouTubeMusic::API->songRating($video_id, sub {
+        my $data = shift || {};
+        my $status = $data->{likeStatus} || 'INDIFFERENT';
+        my $like = $status eq 'LIKE' ? 'INDIFFERENT' : 'LIKE';
+        my $dislike = $status eq 'DISLIKE' ? 'INDIFFERENT' : 'DISLIKE';
+        $cb->({ items => [
+            {
+                name        => cstring($client, $status eq 'LIKE' ? 'PLUGIN_YOUTUBEMUSIC_UNLIKE' : 'PLUGIN_YOUTUBEMUSIC_LIKE'),
+                url         => \&_rate_song,
+                passthrough => [{ videoId => $video_id, rating => $like }],
+                type        => 'link',
+            },
+            {
+                name        => cstring($client, $status eq 'DISLIKE' ? 'PLUGIN_YOUTUBEMUSIC_UNDISLIKE' : 'PLUGIN_YOUTUBEMUSIC_DISLIKE'),
+                url         => \&_rate_song,
+                passthrough => [{ videoId => $video_id, rating => $dislike }],
+                type        => 'link',
+            },
+        ] });
+    }, $client);
+}
+
+sub _rate_song {
+    my ($client, $cb, $args, $pt) = @_;
+    $pt = {} unless ref $pt eq 'HASH';
+    my $key = $pt->{rating} eq 'LIKE' ? 'PLUGIN_YOUTUBEMUSIC_LIKED'
+            : $pt->{rating} eq 'DISLIKE' ? 'PLUGIN_YOUTUBEMUSIC_DISLIKED'
+            : 'PLUGIN_YOUTUBEMUSIC_RATING_CLEARED';
+    Plugins::YouTubeMusic::API->rateSong($pt->{videoId}, $pt->{rating}, sub {
+        _action_done($client, $cb, shift, $key);
+    }, $client);
+}
+
+sub _subscribe_menu {
+    my ($client, $cb, $args, $pt) = @_;
+    $pt = {} unless ref $pt eq 'HASH';
+    my $channel_id = $pt->{channelId} || '';
+    return unless $channel_id;
+    Plugins::YouTubeMusic::API->artistSubscribed($channel_id, sub {
+        my $data = shift || {};
+        my $on = $data->{subscribed} ? 1 : 0;
+        $cb->({ items => [{
+            name        => cstring($client, $on ? 'PLUGIN_YOUTUBEMUSIC_UNSUBSCRIBE' : 'PLUGIN_YOUTUBEMUSIC_SUBSCRIBE'),
+            url         => \&_set_subscription,
+            passthrough => [{ channelId => $channel_id, subscribed => $on ? 0 : 1 }],
+            type        => 'link',
+        }] });
+    }, $client);
+}
+
+sub _set_subscription {
+    my ($client, $cb, $args, $pt) = @_;
+    $pt = {} unless ref $pt eq 'HASH';
+    my $on = $pt->{subscribed} ? 1 : 0;
+    Plugins::YouTubeMusic::API->setSubscription($pt->{channelId}, $on, sub {
+        _action_done($client, $cb, shift, $on ? 'PLUGIN_YOUTUBEMUSIC_SUBSCRIBED' : 'PLUGIN_YOUTUBEMUSIC_UNSUBSCRIBED');
+    }, $client);
+}
+
+sub _save_library {
+    my ($client, $cb, $args, $pt) = @_;
+    $pt = {} unless ref $pt eq 'HASH';
+    my $key = ($pt->{rating} || '') eq 'LIKE'
+        ? 'PLUGIN_YOUTUBEMUSIC_SAVED'
+        : 'PLUGIN_YOUTUBEMUSIC_REMOVED';
+    Plugins::YouTubeMusic::API->savePlaylist($pt->{playlistId}, $pt->{browseId}, $pt->{rating}, sub {
+        _action_done($client, $cb, shift, $key);
+    }, $client);
+}
+
+sub _delete_playlist {
+    my ($client, $cb, $args, $pt) = @_;
+    $pt = {} unless ref $pt eq 'HASH';
+    Plugins::YouTubeMusic::API->deletePlaylist($pt->{playlistId} || $pt->{browseId}, sub {
+        _action_done($client, $cb, shift, 'PLUGIN_YOUTUBEMUSIC_PLAYLIST_DELETED');
+    }, $client);
+}
+
+sub _playlist_picker {
+    my ($client, $cb, $args, $pt) = @_;
+    $pt = {} unless ref $pt eq 'HASH';
+    my $video_id = $pt->{videoId} || '';
+    Plugins::YouTubeMusic::API->library('playlists', sub {
+        my $data = shift;
+        my @items = ({
+            name        => cstring($client, 'PLUGIN_YOUTUBEMUSIC_NEW_PLAYLIST'),
+            type        => 'search',
+            url         => \&_create_playlist,
+            passthrough => [{ videoId => $video_id }],
+        });
+        if (ref $data eq 'ARRAY') {
+            for my $pl (@{$data}) {
+                my $pid = $pl->{playlistId} || $pl->{browseId} || next;
+                push @items, {
+                    name        => $pl->{title} || 'Playlist',
+                    image       => $pl->{thumbnail} || '',
+                    url         => \&_add_to_playlist,
+                    passthrough => [{ playlistId => $pid, videoId => $video_id }],
+                    type        => 'link',
+                };
+            }
+        }
+        $cb->({ items => \@items });
+    }, $client);
+}
+
+sub _add_to_playlist {
+    my ($client, $cb, $args, $pt) = @_;
+    $pt = {} unless ref $pt eq 'HASH';
+    Plugins::YouTubeMusic::API->addToPlaylist($pt->{playlistId}, $pt->{videoId}, sub {
+        _action_done($client, $cb, shift, 'PLUGIN_YOUTUBEMUSIC_ADDED');
+    }, $client);
+}
+
+sub _create_playlist {
+    my ($client, $cb, $args, $pt) = @_;
+    $pt = {} unless ref $pt eq 'HASH';
+    my $title = $args->{search} // '';
+    my @ids = grep { $_ } ($pt->{videoId} || '');
+    Plugins::YouTubeMusic::API->createPlaylist($title, \@ids, sub {
+        _action_done($client, $cb, shift, 'PLUGIN_YOUTUBEMUSIC_PLAYLIST_CREATED');
+    }, $client);
+}
+
+sub _remove_track {
+    my ($client, $cb, $args, $pt) = @_;
+    $pt = {} unless ref $pt eq 'HASH';
+    Plugins::YouTubeMusic::API->removeFromPlaylist($pt->{playlistId}, $pt->{videoId}, $pt->{setVideoId}, sub {
+        _action_done($client, $cb, shift, 'PLUGIN_YOUTUBEMUSIC_REMOVED');
+    }, $client);
+}
+
+sub _remove_history {
+    my ($client, $cb, $args, $pt) = @_;
+    $pt = {} unless ref $pt eq 'HASH';
+    Plugins::YouTubeMusic::API->removeHistory($pt->{feedbackToken}, sub {
+        _action_done($client, $cb, shift, 'PLUGIN_YOUTUBEMUSIC_REMOVED');
+    }, $client);
+}
+
+sub _queue_ids {
+    my ($client) = @_;
+    return () unless $client;
+    my @ids;
+    my $count = eval { Slim::Player::Playlist::count($client) } || 0;
+    for (my $i = 0; $i < $count; $i++) {
+        my $track = eval { Slim::Player::Playlist::track($client, $i) };
+        my $url = $track ? ($track->url || '') : '';
+        push @ids, $1 if $url =~ m{^ytm://([A-Za-z0-9_-]+)};
+    }
+    return @ids;
+}
+
+sub _save_queue {
+    my ($client, $cb, $args) = @_;
+    my $title = $args->{search} // '';
+    my @ids = _queue_ids($client);
+    unless (@ids) {
+        return $cb->({ items => [{ name => cstring($client, 'PLUGIN_YOUTUBEMUSIC_QUEUE_EMPTY'), type => 'text' }] });
+    }
+    Plugins::YouTubeMusic::API->createPlaylist($title, \@ids, sub {
+        _action_done($client, $cb, shift, 'PLUGIN_YOUTUBEMUSIC_PLAYLIST_CREATED');
+    }, $client);
+}
+
+sub _search_history {
+    my ($client, $cb) = @_;
+    unless (Plugins::YouTubeMusic::API->accountId($client)) {
+        return $cb->({ items => [] });
+    }
+    Plugins::YouTubeMusic::API->searchSuggestions('', sub {
+        my $rows = shift;
+        my @items;
+        if (ref $rows eq 'ARRAY') {
+            for my $row (@{$rows}) {
+                next unless ref $row eq 'HASH' && $row->{text} && $row->{fromHistory};
+                my %item = (
+                    name        => $row->{text},
+                    url         => \&_search_dispatch,
+                    passthrough => [{ query => $row->{text} }],
+                    type        => 'link',
+                );
+                if ($row->{feedbackToken}) {
+                    $item{items} = [{
+                        name        => cstring($client, 'PLUGIN_YOUTUBEMUSIC_REMOVE_SEARCH'),
+                        url         => \&_forget_search,
+                        passthrough => [{ feedbackToken => $row->{feedbackToken} }],
+                        type        => 'link',
+                    }];
+                }
+                push @items, \%item;
+            }
+        }
+        $cb->({ items => \@items });
+    }, $client);
+}
+
+sub _forget_search {
+    my ($client, $cb, $args, $pt) = @_;
+    $pt = {} unless ref $pt eq 'HASH';
+    Plugins::YouTubeMusic::API->forgetSearch($pt->{feedbackToken}, sub {
+        _action_done($client, $cb, shift, 'PLUGIN_YOUTUBEMUSIC_REMOVED');
+    }, $client);
 }
 
 1;

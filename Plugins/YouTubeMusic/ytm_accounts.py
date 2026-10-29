@@ -124,6 +124,7 @@ def list_accounts():
             "authExpired": expired,
             "authReason": state.get("reason") or "",
             "accountName": state.get("name") or "",
+            "photo": meta.get("photo") or state.get("photo") or "",
         })
     return out
 
@@ -389,6 +390,13 @@ def _album_name(item):
     return album or ""
 
 
+def _plain_playlist_id(value):
+    value = (value or "").strip()
+    if value.startswith("VL"):
+        return value[2:]
+    return value
+
+
 def _playlist_browse_id(item):
     browse_id = item.get("browseId") or ""
     playlist_id = item.get("playlistId") or ""
@@ -415,7 +423,7 @@ def map_item(item):
             if kind in ("album", "artist"):
                 pass
             else:
-                return {
+                song = {
                     "type": "song",
                     "title": item.get("title") or "",
                     "artist": _artists(item),
@@ -426,6 +434,11 @@ def map_item(item):
                     "url": f"ytm://{video_id}",
                     "played": item.get("played") or "",
                 }
+                if item.get("setVideoId"):
+                    song["setVideoId"] = item["setVideoId"]
+                if item.get("feedbackToken"):
+                    song["feedbackToken"] = item["feedbackToken"]
+                return song
     if kind == "artist" or browse_id.startswith("UC"):
         return {
             "type": "artist",
@@ -442,6 +455,7 @@ def map_item(item):
             "artist": _artists(item),
             "year": item.get("year") or "",
             "browseId": browse_id,
+            "playlistId": _plain_playlist_id(item.get("audioPlaylistId") or item.get("playlistId") or ""),
             "thumbnail": _thumb(item.get("thumbnails") or item.get("thumbnail")),
         }
     playlist_id = _playlist_browse_id(item)
@@ -450,6 +464,7 @@ def map_item(item):
             "type": "playlist",
             "title": item.get("title") or "",
             "browseId": playlist_id,
+            "playlistId": _plain_playlist_id(item.get("playlistId") or playlist_id),
             "thumbnail": _thumb(item.get("thumbnails") or item.get("thumbnail")),
             "subtitle": item.get("description") or item.get("count") or "",
             "count": str(item.get("count") or item.get("trackCount") or ""),
@@ -622,6 +637,7 @@ def _has_account_menu(node):
 def _account_identity(response):
     name = ""
     handle = ""
+    photo = ""
     for current in _walk(response):
         header = current.get("activeAccountHeaderRenderer")
         if not isinstance(header, dict):
@@ -633,8 +649,9 @@ def _account_identity(response):
             continue
         name = found
         handle = _runs_text(header.get("channelHandle") or {}) or handle
+        photo = _thumb((header.get("accountPhoto") or {}).get("thumbnails"))
         break
-    return name, handle
+    return name, handle, photo
 
 
 def _reject_if_signed_out(response, where):
@@ -654,7 +671,7 @@ def _notifier_message(response):
     return "; ".join(messages[:3])
 
 
-def _remember_auth(account_id, ok, reason, name="", handle="", where=""):
+def _remember_auth(account_id, ok, reason, name="", handle="", where="", photo=""):
     with _LOCK:
         prev = _AUTH.get(account_id) or {}
         changed = prev.get("ok") != ok or prev.get("reason") != reason
@@ -664,8 +681,15 @@ def _remember_auth(account_id, ok, reason, name="", handle="", where=""):
             "reason": reason,
             "name": name or "",
             "handle": handle or "",
+            "photo": photo or prev.get("photo") or "",
         }
         _AUTH[account_id] = state
+    if account_id and state.get("photo"):
+        index = _read_index()
+        meta = index.get(account_id)
+        if isinstance(meta, dict) and meta.get("photo") != state["photo"]:
+            meta["photo"] = state["photo"]
+            _write_index(index)
     if changed and account_id:
         if ok and reason == "ok":
             logging.info("Account %s session is signed in as %s", account_id, name or "unknown")
@@ -727,9 +751,9 @@ def verify_auth(account_id, force=False):
     except Exception as exc:
         logging.warning("Account %s auth check failed: %s", account_id, _exc_brief(exc))
         return _remember_auth(account_id, False, "request_failed")
-    name, handle = _account_identity(response)
+    name, handle, photo = _account_identity(response)
     if name:
-        return _remember_auth(account_id, True, "ok", name, handle)
+        return _remember_auth(account_id, True, "ok", name, handle, photo=photo)
     if _payload_signed_out(response) or _has_account_menu(response):
         return _remember_auth(account_id, False, "signed_out")
     keys = list(response)[:8] if isinstance(response, dict) else []
@@ -1397,6 +1421,20 @@ def _column_text(renderer, index):
         return ""
 
 
+def _history_token(renderer):
+    items = (((renderer.get("menu") or {}).get("menuRenderer") or {}).get("items") or [])
+    for item in items:
+        node = item.get("menuServiceItemRenderer") or item.get("menuNavigationItemRenderer") or {}
+        icon = (node.get("icon") or {}).get("iconType") or ""
+        if icon != "REMOVE_FROM_HISTORY":
+            continue
+        endpoint = node.get("serviceEndpoint") or node.get("navigationEndpoint") or {}
+        token = (endpoint.get("feedbackEndpoint") or {}).get("feedbackToken") or ""
+        if token:
+            return token
+    return ""
+
+
 def _list_item_thumb(renderer):
     thumbs = (
         renderer.get("thumbnail", {})
@@ -1427,6 +1465,9 @@ def _history_items(response):
             "url": f"ytm://{video_id}",
             "played": played or "History",
         })
+        token = _history_token(renderer)
+        if token:
+            found[-1]["feedbackToken"] = token
 
     def walk(node, played):
         if isinstance(node, dict):
@@ -1550,6 +1591,225 @@ def song_info(account_id, video_id):
         with _LOCK:
             _SONG_INFLIGHT.pop(video_id, None)
         event.set()
+
+
+_STATUS_CACHE = {}
+_STATUS_TTL = 60
+_RATINGS = {"LIKE", "DISLIKE", "INDIFFERENT"}
+
+
+def _status_get(key):
+    hit = _STATUS_CACHE.get(key)
+    if hit and hit[0] > time.time():
+        return hit[1]
+    return None
+
+
+def _status_set(key, value):
+    _STATUS_CACHE[key] = (time.time() + _STATUS_TTL, value)
+    if len(_STATUS_CACHE) > 400:
+        now = time.time()
+        for old in list(_STATUS_CACHE):
+            if _STATUS_CACHE[old][0] <= now:
+                _STATUS_CACHE.pop(old, None)
+
+
+def _like_status(rating):
+    from ytmusicapi.models.content.enums import LikeStatus
+    if rating not in _RATINGS:
+        raise ValueError("rating must be LIKE, DISLIKE, or INDIFFERENT")
+    return LikeStatus(rating)
+
+
+def _ok_status(result):
+    if isinstance(result, dict) and "SUCCEEDED" in str(result.get("status", "")):
+        return True
+    if result in ("STATUS_SUCCEEDED",):
+        return True
+    return bool(result) and not isinstance(result, dict)
+
+
+def song_rating(account_id, video_id):
+    key = ("song", account_id, video_id)
+    cached = _status_get(key)
+    if cached is not None:
+        return cached
+
+    def run(yt):
+        data = yt.get_watch_playlist(videoId=video_id, limit=1)
+        status = "INDIFFERENT"
+        for track in data.get("tracks") or []:
+            if track.get("videoId") == video_id or not status:
+                found = track.get("likeStatus") or ""
+                if found:
+                    status = found
+                if track.get("videoId") == video_id:
+                    break
+        return {"videoId": video_id, "likeStatus": status}
+
+    result = _call(account_id, run, require_auth=True)
+    if isinstance(result, dict) and result.get("likeStatus"):
+        _status_set(key, result)
+    return result
+
+
+def rate_song(account_id, video_id, rating):
+    def run(yt):
+        yt.rate_song(video_id, _like_status(rating))
+        return {"ok": True, "likeStatus": rating}
+
+    result = _call(account_id, run, require_auth=True)
+    if isinstance(result, dict) and result.get("ok"):
+        _status_set(("song", account_id, video_id), {"videoId": video_id, "likeStatus": rating})
+    return result
+
+
+def artist_subscribed(account_id, channel_id):
+    key = ("artist", account_id, channel_id)
+    cached = _status_get(key)
+    if cached is not None:
+        return cached
+
+    def run(yt):
+        data = yt.get_artist(channel_id)
+        return {"channelId": channel_id, "subscribed": bool(data.get("subscribed"))}
+
+    result = _call(account_id, run, require_auth=True)
+    if isinstance(result, dict) and "subscribed" in result:
+        _status_set(key, result)
+    return result
+
+
+def set_subscription(account_id, channel_id, subscribed):
+    def run(yt):
+        if subscribed:
+            yt.subscribe_artist(channel_id)
+        else:
+            yt.unsubscribe_artists([channel_id])
+        return {"ok": True, "subscribed": bool(subscribed)}
+
+    result = _call(account_id, run, require_auth=True)
+    if isinstance(result, dict) and result.get("ok"):
+        _status_set(("artist", account_id, channel_id), {
+            "channelId": channel_id,
+            "subscribed": bool(subscribed),
+        })
+    return result
+
+
+def save_playlist(account_id, playlist_id, browse_id, rating):
+    def run(yt):
+        pid = _plain_playlist_id(playlist_id)
+        if not pid and browse_id:
+            if str(browse_id).startswith("MPRE"):
+                album = yt.get_album(browse_id)
+                pid = _plain_playlist_id(album.get("audioPlaylistId") or "")
+            else:
+                pid = _plain_playlist_id(browse_id)
+        if not pid:
+            return {"ok": False, "error": "Missing playlist"}
+        result = yt.rate_playlist(pid, _like_status(rating))
+        if isinstance(result, dict) and result.get("error"):
+            return {"ok": False, "error": "Could not update library"}
+        return {"ok": True, "playlistId": pid, "likeStatus": rating}
+
+    return _call(account_id, run, require_auth=True)
+
+
+def add_to_playlist(account_id, playlist_id, video_id):
+    def run(yt):
+        pid = _plain_playlist_id(playlist_id)
+        result = yt.add_playlist_items(pid, [video_id])
+        ok = _ok_status(result)
+        return {"ok": ok, "error": "" if ok else "Could not add to playlist"}
+
+    return _call(account_id, run, require_auth=True)
+
+
+def create_playlist(account_id, title, video_ids):
+    def run(yt):
+        name = (title or "").strip()
+        if not name:
+            return {"ok": False, "error": "Missing title"}
+        ids = [video for video in (video_ids or []) if video][:200]
+        result = yt.create_playlist(name, "", "PRIVATE", video_ids=ids or None)
+        if isinstance(result, str) and result:
+            return {"ok": True, "playlistId": result}
+        return {"ok": False, "error": "Could not create playlist"}
+
+    return _call(account_id, run, require_auth=True)
+
+
+def remove_from_playlist(account_id, playlist_id, video_id, set_video_id):
+    def run(yt):
+        if not set_video_id:
+            return {"ok": False, "error": "This track cannot be removed"}
+        result = yt.remove_playlist_items(_plain_playlist_id(playlist_id), [{
+            "videoId": video_id,
+            "setVideoId": set_video_id,
+        }])
+        ok = _ok_status(result)
+        return {"ok": ok, "error": "" if ok else "Could not remove track"}
+
+    return _call(account_id, run, require_auth=True)
+
+
+def delete_playlist(account_id, playlist_id):
+    def run(yt):
+        result = yt.delete_playlist(_plain_playlist_id(playlist_id))
+        ok = _ok_status(result)
+        return {"ok": ok, "error": "" if ok else "Could not delete playlist"}
+
+    return _call(account_id, run, require_auth=True)
+
+
+def search_suggestions(account_id, query):
+    def run(yt):
+        rows = yt.get_search_suggestions(query or "", detailed_runs=True)
+        out = []
+        for row in rows or []:
+            if isinstance(row, str):
+                out.append({"text": row, "fromHistory": False, "feedbackToken": ""})
+            elif isinstance(row, dict) and row.get("text"):
+                out.append({
+                    "text": row["text"],
+                    "fromHistory": bool(row.get("fromHistory")),
+                    "feedbackToken": row.get("feedbackToken") or "",
+                })
+        return out
+
+    return _call(account_id, run, require_auth=True)
+
+
+def remove_search_suggestion(account_id, token):
+    def run(yt):
+        if not token:
+            return {"ok": False, "error": "Missing suggestion"}
+        yt._send_request("feedback", {"feedbackTokens": [token]})
+        return {"ok": True}
+
+    return _call(account_id, run, require_auth=True)
+
+
+def add_history(account_id, video_id):
+    def run(yt):
+        song = yt.get_song(video_id)
+        if not (song.get("playbackTracking") or {}).get("videostatsPlaybackUrl"):
+            return {"ok": False, "error": "No playback record"}
+        yt.add_history_item(song)
+        return {"ok": True}
+
+    return _call(account_id, run, require_auth=True)
+
+
+def remove_history(account_id, token):
+    def run(yt):
+        if not token:
+            return {"ok": False, "error": "Missing history item"}
+        yt.remove_history_items([token])
+        return {"ok": True}
+
+    return _call(account_id, run, require_auth=True)
 
 
 def test_account(account_id):

@@ -5,15 +5,22 @@
     [% IF accountImportStatus %]
       <p><strong>[% accountImportStatus | html %]</strong></p>
     [% END %]
-    <p>
+    <div>
       Default account
-      <select name="pref_activeAccount">
-        <option value="" [% IF !activeAccount %]selected[% END %]>Anonymous (no account)</option>
-        [% FOREACH account IN accountList %]
-          <option value="[% account.id | html %]" [% IF activeAccount == account.id %]selected[% END %]>[% account.name | html %][% IF account.channel %] ([% account.channel | html %])[% END %]</option>
-        [% END %]
-      </select>
-    </p>
+      <label style="display:flex;align-items:center;gap:8px;margin:6px 0;">
+        <input type="radio" name="pref_activeAccount" value="" [% IF !activeAccount %]checked[% END %] />
+        Anonymous (no account)
+      </label>
+      [% FOREACH account IN accountList %]
+        <label style="display:flex;align-items:center;gap:8px;margin:6px 0;">
+          <input type="radio" name="pref_activeAccount" value="[% account.id | html %]" [% IF activeAccount == account.id %]checked[% END %] />
+          [% IF account.photoSrc %]
+            <img src="[% account.photoSrc | html %]" width="36" height="36" alt="" style="border-radius:50%;object-fit:cover;" />
+          [% END %]
+          <span>[% account.name | html %][% IF account.channel %] ([% account.channel | html %])[% END %]</span>
+        </label>
+      [% END %]
+    </div>
     <p>
       Remove account
       <select name="pref_deleteAccount">
