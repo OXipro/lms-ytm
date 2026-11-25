@@ -20,6 +20,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Fetch the annotated tag
+        run: git fetch --force origin "refs/tags/${GITHUB_REF_NAME}:refs/tags/${GITHUB_REF_NAME}"
+
       - name: Pack zip and repo.xml
         env:
           GITHUB_REPOSITORY: ${{ github.repository }}
@@ -33,9 +36,10 @@ jobs:
             exit 1
           }
           subject=$(git tag -l --format='%(contents:subject)' "$GITHUB_REF_NAME" | head -1)
-          if [ -n "$subject" ] && [ "$subject" != "v$version" ] && [ "$subject" != "$GITHUB_REF_NAME" ]; then
-            export PLUGIN_CHANGES="$version: $subject"
-          fi
+          case "$subject" in
+            ""|"v$version"|"$GITHUB_REF_NAME"|"Release $version") ;;
+            *) export PLUGIN_CHANGES="$version: $subject" ;;
+          esac
           python3 scripts/pack-plugin.py
           echo "VERSION=$version" >> "$GITHUB_ENV"
 
@@ -46,8 +50,17 @@ jobs:
           set -eu
           notes_file="$RUNNER_TEMP/release-notes.md"
           git tag -l --format='%(contents)' "$GITHUB_REF_NAME" > "$notes_file"
-          if [ ! -s "$notes_file" ]; then
-            printf 'YouTube Music plugin %s\n' "$VERSION" > "$notes_file"
+          subject=$(head -n 1 "$notes_file" || true)
+          if [ ! -s "$notes_file" ] || [ "$subject" = "Release $VERSION" ]; then
+            python3 - "$notes_file" "$VERSION" <<'PY'
+import re, sys
+from pathlib import Path
+dest, version = sys.argv[1], sys.argv[2]
+xml = Path("repo.xml").read_text(encoding="utf-8")
+match = re.search(r"<changes[^>]*>(.*?)</changes>", xml, re.S)
+text = re.sub(r"\s+", " ", match.group(1)).strip() if match else ""
+Path(dest).write_text((text or f"YouTube Music plugin {version}") + "\n", encoding="utf-8")
+PY
           fi
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
             gh release upload "$GITHUB_REF_NAME" dist/lms-ytm.zip dist/repo.xml --clobber
