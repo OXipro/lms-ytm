@@ -233,16 +233,32 @@ sub getNextTrack {
 
     $song->streamUrl($streamUrl);
     _fetch_metadata($vid, $song, $player);
-    # Start downloading current track NOW before LMS opens the stream
-    $log->info("EARLY PREFETCH START $vid");
-    Plugins::YouTubeMusic::API->prefetch($vid, sub {}, $player);
+    $log->info("Waiting for audio bytes: $vid");
+    _wait_for_audio($song, $vid, $player, $successCb, $errorCb, time() + 20);
+}
 
-
-    # Only trigger prefetch chain for the first track — subsequent tracks
-    # are prefetched by the chain itself as playback progresses
-    my $prefetch_client = eval { $song->master() };
-    _prefetch_with_client($prefetch_client) if $prefetch_client;
-    $successCb->();
+sub _wait_for_audio {
+    my ($song, $vid, $player, $successCb, $errorCb, $deadline) = @_;
+    Plugins::YouTubeMusic::API->prefetch($vid, sub {
+        my $data = shift || {};
+        my $bytes = $data->{bytes} || 0;
+        my $status = $data->{status} || '';
+        if ($bytes >= 16384 || ($status eq 'already_cached' && $bytes > 0)) {
+            my $prefetch_client = eval { $song->master() };
+            _prefetch_with_client($prefetch_client) if $prefetch_client;
+            $successCb->();
+            return;
+        }
+        if ($status eq 'failed' || time() >= $deadline) {
+            my $why = $data->{error} || 'YouTube Music produced no audio';
+            $log->warn("Playback not started for $vid: $why");
+            $errorCb->($why);
+            return;
+        }
+        Slim::Utils::Timers::setTimer(undef, Time::HiRes::time() + 0.2, sub {
+            _wait_for_audio($song, $vid, $player, $successCb, $errorCb, $deadline);
+        });
+    }, $player);
 }
 
 sub _prefetch_with_client {
