@@ -82,6 +82,15 @@ sub initPlugin {
         weight => 10,
     );
 
+    Slim::Control::Request::addDispatch(
+        ['youtubemusic', 'playnow'],
+        [1, 0, 1, \&_cli_playnow],
+    );
+    Slim::Control::Request::addDispatch(
+        ['youtubemusic', 'queue'],
+        [1, 0, 1, \&_cli_queue],
+    );
+
     if (main::WEBUI) {
         require Plugins::YouTubeMusic::Settings;
         Plugins::YouTubeMusic::Settings->new($class);
@@ -485,6 +494,51 @@ sub _menu_row {
         url  => $url,
         icon => $icon,
         %extra,
+    };
+}
+
+sub _popup {
+    my ($client, $text) = @_;
+    return unless $client && $text;
+    $client->showBriefly({
+        jive => { type => 'popupplay', text => [ $text ] },
+    });
+}
+
+sub _cli_play_url {
+    my ($request, $command) = @_;
+    my $client = $request->client();
+    my $url = $request->getParam('url') || '';
+    unless ($client && $url =~ /^(?:ytm|ytmplaylist):/) {
+        $request->setStatusBadParams();
+        return;
+    }
+    $client->execute(['playlist', $command, $url]);
+    $request->setStatusDone();
+}
+
+sub _cli_playnow { _cli_play_url(shift, 'play') }
+sub _cli_queue   { _cli_play_url(shift, 'add') }
+
+sub _play_actions {
+    my ($url) = @_;
+    return {
+        play => { command => ['youtubemusic', 'playnow'], fixedParams => { url => $url } },
+        add  => { command => ['youtubemusic', 'queue'],   fixedParams => { url => $url } },
+    };
+}
+
+sub _command_row {
+    my ($client, $label, $command, $url) = @_;
+    return {
+        name => $label,
+        type => 'link',
+        url  => sub {
+            my ($c, $cb) = @_;
+            $c->execute(['playlist', $command, $url]) if $c && $url;
+            _popup($c, $label);
+            $cb->({ items => [{ name => $label, type => 'text', nextWindow => 'nowPlaying' }] });
+        },
     };
 }
 
@@ -989,7 +1043,6 @@ my $type = $params->{browse_type} // 'playlist';
             playall    => 1,
             playlistId => $params->{playlistId} || $params->{browseId} || '',
         }) };
-        unshift @menu, _library_actions($client, $params);
         $callback->({ items => \@menu, playall => 1 });
     }, $client);
 }
@@ -1048,14 +1101,17 @@ sub _items_to_menu {
             push @menu, \%song;
         }
         elsif ($type eq 'album' && $item->{browseId}) {
+            my $play_url = "ytmplaylist://$item->{browseId}";
             push @menu, {
                 name        => $item->{title}  || 'Unknown Album',
                 line2       => join(' - ', grep { $_ } $item->{artist}, $item->{year}),
                 image       => $item->{thumbnail} || '',
                 $item->{thumbnail} ? () : (icon => $fallback_icon{album}),
                 url         => \&_playlist_menu,
-                play        => "ytmplaylist://$item->{browseId}",
+                play        => $play_url,
                 type        => 'playlist',
+                itemActions => _play_actions($play_url),
+                items       => [ _collection_items($client, $item, 'album') ],
                 passthrough => [{
                     browseId    => $item->{browseId},
                     playlistId  => $item->{playlistId} || '',
@@ -1084,14 +1140,17 @@ sub _items_to_menu {
             };
         }
         elsif ($type eq 'playlist' && $item->{browseId}) {
+            my $play_url = "ytmplaylist://$item->{browseId}";
             push @menu, {
                 name        => $item->{title}  || 'Unknown Playlist',
                 line2       => $item->{author} || $item->{count} || '',
                 image       => $item->{thumbnail} || '',
                 $item->{thumbnail} ? () : (icon => $fallback_icon{playlist}),
                 url         => \&_playlist_menu,
-                play        => "ytmplaylist://$item->{browseId}",
+                play        => $play_url,
                 type        => 'playlist',
+                itemActions => _play_actions($play_url),
+                items       => [ _collection_items($client, $item, 'playlist') ],
                 passthrough => [{
                     browseId    => $item->{browseId},
                     playlistId  => $item->{playlistId} || '',
@@ -1167,6 +1226,33 @@ sub trackInfoMenu {
     return unless $video_id;
     my @items = _track_actions($client, $video_id);
     return @items ? \@items : undef;
+}
+
+sub _collection_items {
+    my ($client, $item, $kind) = @_;
+    my $id = $item->{browseId} || '';
+    my $url = "ytmplaylist://$id";
+    my @rows = (
+        _command_row($client, cstring($client, 'PLUGIN_YOUTUBEMUSIC_PLAY'), 'play', $url),
+        _command_row($client, cstring($client, 'PLUGIN_YOUTUBEMUSIC_ADD_TO_QUEUE'), 'add', $url),
+    );
+    my $who = $item->{artist} || $item->{author} || '';
+    if ($item->{artistBrowseId}) {
+        push @rows, {
+            name        => $who || cstring($client, 'PLUGIN_YOUTUBEMUSIC_ARTIST'),
+            url         => \&_artist_menu,
+            passthrough => [{ browseId => $item->{artistBrowseId} }],
+            type        => 'link',
+        };
+    } elsif ($who) {
+        push @rows, { name => $who, type => 'text' };
+    }
+    push @rows, _library_actions($client, {
+        browseId    => $id,
+        playlistId  => $item->{playlistId} || '',
+        browse_type => $kind,
+    });
+    return @rows;
 }
 
 sub _track_actions {
