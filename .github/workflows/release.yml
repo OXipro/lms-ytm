@@ -52,15 +52,12 @@ jobs:
           git tag -l --format='%(contents)' "$GITHUB_REF_NAME" > "$notes_file"
           subject=$(head -n 1 "$notes_file" || true)
           if [ ! -s "$notes_file" ] || [ "$subject" = "Release $VERSION" ]; then
-            python3 - "$notes_file" "$VERSION" <<'PY'
-import re, sys
-from pathlib import Path
-dest, version = sys.argv[1], sys.argv[2]
-xml = Path("repo.xml").read_text(encoding="utf-8")
-match = re.search(r"<changes[^>]*>(.*?)</changes>", xml, re.S)
-text = re.sub(r"\s+", " ", match.group(1)).strip() if match else ""
-Path(dest).write_text((text or f"YouTube Music plugin {version}") + "\n", encoding="utf-8")
-PY
+            changes=$(sed -n 's:.*<changes[^>]*>\(.*\)</changes>.*:\1:p' repo.xml | head -1)
+            if [ -n "$changes" ]; then
+              printf '%s\n' "$changes" > "$notes_file"
+            else
+              printf 'YouTube Music plugin %s\n' "$VERSION" > "$notes_file"
+            fi
           fi
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
             gh release upload "$GITHUB_REF_NAME" dist/lms-ytm.zip dist/repo.xml --clobber
