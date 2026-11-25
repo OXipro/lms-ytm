@@ -243,6 +243,12 @@ def _shelf_items(shelf):
             item = _classify_and_parse(r)
             if item:
                 results.append(item)
+            continue
+        episode = entry.get("musicMultiRowListItemRenderer")
+        if episode:
+            parsed = _parse_podcast_episode(episode)
+            if parsed:
+                results.append(parsed)
     return results
 
 def _single_col_sections(data):
