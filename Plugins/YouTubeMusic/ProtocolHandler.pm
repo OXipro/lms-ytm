@@ -277,20 +277,24 @@ sub _prefetch_with_client {
             $log->info("Prefetching next track: $next_vid");
             Plugins::YouTubeMusic::API->prefetch($next_vid, sub {}, $client);
         }
-        my $next2_index = $next_index + 1;
-        if ($next2_index < $count) {
-            my $next2_track = eval { Slim::Player::Playlist::track($client, $next2_index) };
-            my $next2_url = $next2_track ? eval { $next2_track->url } : '';
-            my ($next2_vid) = ($next2_url // '') =~ m{^ytm://([A-Za-z0-9_\-]+)};
-            Plugins::YouTubeMusic::API->prefetch($next2_vid, sub {}, $client) if $next2_vid;
-        }
     }
     if (($prefs->get('autoplay') // 1) && ($count - $current_index) <= 1) {
-        my $cur_track = eval { Slim::Player::Playlist::track($client, $current_index) };
-        my $cur_url = $cur_track ? eval { $cur_track->url } : '';
-        my ($cur_vid) = ($cur_url // '') =~ m{^ytm://([A-Za-z0-9_\-]+)};
-        _start_radio($client, $cur_vid) if $cur_vid;
+        Slim::Utils::Timers::killTimers($client, \&_deferred_radio);
+        Slim::Utils::Timers::setTimer($client, Time::HiRes::time() + 8, \&_deferred_radio);
     }
+}
+
+sub _deferred_radio {
+    my ($client) = @_;
+    return unless $client;
+    my $current_index = eval { Slim::Player::Source::playingSongIndex($client) };
+    return unless defined $current_index;
+    my $count = eval { Slim::Player::Playlist::count($client) } || 0;
+    return if ($count - $current_index) > 1;
+    my $cur_track = eval { Slim::Player::Playlist::track($client, $current_index) };
+    my $cur_url = $cur_track ? eval { $cur_track->url } : '';
+    my ($cur_vid) = ($cur_url // '') =~ m{^ytm://([A-Za-z0-9_\-]+)};
+    _start_radio($client, $cur_vid) if $cur_vid;
 }
 
 sub _prefetch_next_track {
