@@ -505,6 +505,12 @@ sub _popup {
     });
 }
 
+sub _notice {
+    my ($client, $callback, $text) = @_;
+    _popup($client, $text);
+    $callback->({ items => [{ name => $text, type => 'text' }] });
+}
+
 sub _cli_play_url {
     my ($request, $command) = @_;
     my $client = $request->client();
@@ -567,37 +573,35 @@ sub _top_level {
         my $icon = _ytm_icon();
         my $has_accounts = scalar keys %{$accounts};
         my $expired = _auth_notice($client, $status);
-        if ($expired) {
-            push @items, { name => $expired, type => 'text' };
-        }
+        _popup($client, $expired) if $expired;
         if ($has_accounts) {
+            my $account_label = $activeName || cstring($client, 'PLUGIN_YOUTUBEMUSIC_ACCOUNT_ANON');
+            $account_label .= ' (session expired)' if $expired && $activeName;
             push @items, _menu_row(
                 $client,
-                $activeName || cstring($client, 'PLUGIN_YOUTUBEMUSIC_ACCOUNT_ANON'),
+                $account_label,
                 \&_account_switcher,
                 $icon,
                 type => 'link',
             );
         }
 
+        push @items, _menu_row($client, cstring($client, 'PLUGIN_YOUTUBEMUSIC_SEARCH'), \&_search_dispatch, '/html/images/search.png', type => 'search');
+        if ($activeId) {
+            push @items, (
+                _menu_row($client, cstring($client, 'PLUGIN_YOUTUBEMUSIC_HOME'), \&_home_menu, 'plugins/YouTubeMusic/html/images/featured_MTL_icon_home.png'),
+                _menu_row($client, cstring($client, 'PLUGIN_YOUTUBEMUSIC_LIBRARY'), \&_library_menu, '/html/images/musicfolder.png'),
+                _menu_row($client, cstring($client, 'PLUGIN_YOUTUBEMUSIC_HISTORY'), \&_history_menu, '/html/images/years.png'),
+                _menu_row($client, cstring($client, 'PLUGIN_YOUTUBEMUSIC_RECENT_SEARCHES'), \&_search_history, '/html/images/search.png'),
+            );
+        }
         push @items, (
-            _menu_row($client, cstring($client, 'PLUGIN_YOUTUBEMUSIC_SEARCH'), \&_search_dispatch, '/html/images/search.png', type => 'search'),
-            _menu_row($client, cstring($client, 'PLUGIN_YOUTUBEMUSIC_HOME'), \&_home_menu, 'plugins/YouTubeMusic/html/images/featured_MTL_icon_home.png'),
             _menu_row($client, cstring($client, 'PLUGIN_YOUTUBEMUSIC_CHARTS'), \&_charts_menu, 'plugins/YouTubeMusic/html/images/charts_MTL_icon_leaderboard.png'),
             _menu_row($client, cstring($client, 'PLUGIN_YOUTUBEMUSIC_NEW_RELEASES'), \&_new_releases_menu, '/html/images/newmusic.png'),
             _menu_row($client, cstring($client, 'PLUGIN_YOUTUBEMUSIC_MOODS'), \&_moods_menu, '/html/images/genres.png'),
             _menu_row($client, cstring($client, 'PLUGIN_YOUTUBEMUSIC_MY_PLAYLISTS'), \&_my_playlists_menu, '/html/images/playlists.png'),
             _menu_row($client, cstring($client, 'PLUGIN_YOUTUBEMUSIC_PODCASTS'), \&_podcasts_menu, '/html/images/radio.png'),
         );
-
-        if ($activeId) {
-            my $insert_at = ($expired ? 1 : 0) + ($has_accounts ? 1 : 0) + 1;
-            splice @items, $insert_at, 0, (
-                _menu_row($client, cstring($client, 'PLUGIN_YOUTUBEMUSIC_LIBRARY'), \&_library_menu, '/html/images/musicfolder.png'),
-                _menu_row($client, cstring($client, 'PLUGIN_YOUTUBEMUSIC_HISTORY'), \&_history_menu, '/html/images/years.png'),
-                _menu_row($client, cstring($client, 'PLUGIN_YOUTUBEMUSIC_RECENT_SEARCHES'), \&_search_history, '/html/images/search.png'),
-            );
-        }
 
         $callback->({ items => \@items });
     };
@@ -677,7 +681,7 @@ sub _switch_account {
 sub _library_menu {
     my ($client, $callback) = @_;
     unless (Plugins::YouTubeMusic::API->accountId($client)) {
-        $callback->({ items => [{ name => cstring($client, 'PLUGIN_YOUTUBEMUSIC_ACCOUNT_REQUIRED'), type => 'text' }] });
+        _notice($client, $callback, cstring($client, 'PLUGIN_YOUTUBEMUSIC_ACCOUNT_REQUIRED'));
         return;
     }
     $callback->({ items => [
@@ -700,8 +704,7 @@ sub _library_list {
     Plugins::YouTubeMusic::API->library($kind, sub {
         my $data = shift;
         if (!$data || ref $data ne 'ARRAY') {
-            my $err = _feed_error($client, $data, cstring($client, 'PLUGIN_YOUTUBEMUSIC_ERROR_PROXY_FAILED'));
-            return $callback->({ items => [{ name => $err, type => 'text' }] });
+            return _notice($client, $callback, _feed_error($client, $data, cstring($client, 'PLUGIN_YOUTUBEMUSIC_ERROR_PROXY_FAILED')));
         }
         $callback->({ items => _items_to_menu($client, $data), playall => 1 });
     }, $client);
@@ -712,10 +715,10 @@ sub _liked_menu {
     Plugins::YouTubeMusic::API->liked(sub {
         my $data = shift;
         unless ($data && ref $data eq 'HASH') {
-            return $callback->({ items => [{ name => cstring($client, 'PLUGIN_YOUTUBEMUSIC_ERROR_PROXY_FAILED'), type => 'text' }] });
+            return _notice($client, $callback, cstring($client, 'PLUGIN_YOUTUBEMUSIC_ERROR_PROXY_FAILED'));
         }
         if ($data->{error}) {
-            return $callback->({ items => [{ name => _feed_error($client, $data, $data->{error}), type => 'text' }] });
+            return _notice($client, $callback, _feed_error($client, $data, $data->{error}));
         }
         $callback->({ items => _items_to_menu($client, $data->{items} || [], { playall => 1 }), playall => 1 });
     }, $client);
@@ -726,8 +729,7 @@ sub _history_menu {
     Plugins::YouTubeMusic::API->history(sub {
         my $data = shift;
         if (!$data || ref $data ne 'ARRAY') {
-            my $err = _feed_error($client, $data, cstring($client, 'PLUGIN_YOUTUBEMUSIC_ACCOUNT_REQUIRED'));
-            return $callback->({ items => [{ name => $err, type => 'text' }] });
+            return _notice($client, $callback, _feed_error($client, $data, cstring($client, 'PLUGIN_YOUTUBEMUSIC_ACCOUNT_REQUIRED')));
         }
         if (!@$data) {
             return $callback->({ items => [{ name => cstring($client, 'PLUGIN_YOUTUBEMUSIC_HISTORY_EMPTY'), type => 'text' }] });
@@ -826,12 +828,14 @@ sub _section_link {
 sub _home_menu {
     my ($client, $callback, $args, $pt) = @_;
     my $refresh = (ref $pt eq 'HASH' && $pt->{refresh}) ? 1 : 0;
+    unless (Plugins::YouTubeMusic::API->accountId($client)) {
+        return _notice($client, $callback, cstring($client, 'PLUGIN_YOUTUBEMUSIC_ACCOUNT_REQUIRED'));
+    }
 
     Plugins::YouTubeMusic::API->browseHome(sub {
         my $sections = shift;
         unless ($sections && ref $sections eq 'ARRAY') {
-            my $err = _feed_error($client, $sections, cstring($client, 'PLUGIN_YOUTUBEMUSIC_ERROR_PROXY_FAILED'));
-            return $callback->({ items => [{ name => $err, type => 'text' }] });
+            return _notice($client, $callback, _feed_error($client, $sections, cstring($client, 'PLUGIN_YOUTUBEMUSIC_ERROR_PROXY_FAILED')));
         }
 
         my @items = (
