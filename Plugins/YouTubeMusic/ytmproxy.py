@@ -97,6 +97,17 @@ def _col(renderer, col_idx, run_idx=0):
     except (IndexError, KeyError):
         return ""
 
+def _col_browse(renderer, col_idx):
+    try:
+        runs = renderer["flexColumns"][col_idx]["musicResponsiveListItemFlexColumnRenderer"]["text"]["runs"]
+    except (IndexError, KeyError, TypeError):
+        return ""
+    for run in runs or []:
+        bid = run.get("navigationEndpoint", {}).get("browseEndpoint", {}).get("browseId", "")
+        if bid:
+            return bid
+    return ""
+
 def _fixed_col(renderer, col_idx=0, run_idx=0):
     """Extract text from fixedColumns (used for duration in playlists)."""
     try:
@@ -151,6 +162,8 @@ def _parse_song(r):
         "album":     _col(r, 2),
         "duration":  _duration_to_secs(_fixed_col(r, 0) or _col(r, 3) or _col(r, 4)),
         "videoId":   video_id,
+        "artistBrowseId": _col_browse(r, 1),
+        "albumBrowseId": _col_browse(r, 2),
         "thumbnail": _thumb_from_renderer(r),
         "url":       f"ytm://{video_id}" if video_id else "",
     }
@@ -162,6 +175,7 @@ def _parse_album(r):
         "title":     _col(r, 0),
         "artist":    _col(r, 1),
         "year":      _col(r, 2),
+        "artistBrowseId": _col_browse(r, 1),
         "browseId":  browse_ep.get("browseId", ""),
         "thumbnail": _thumb_from_renderer(r),
     }
@@ -213,7 +227,8 @@ def _parse_playlist(r):
     return {
         "type":      "playlist",
         "title":     _col(r, 0),
-        "count":     _col(r, 1),
+        "author":    _col(r, 1),
+        "artistBrowseId": _col_browse(r, 1),
         "browseId":  browse_ep.get("browseId", ""),
         "thumbnail": _thumb_from_renderer(r),
     }

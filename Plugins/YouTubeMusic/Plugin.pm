@@ -952,15 +952,6 @@ sub _artist_menu {
             }
         } @{ $data->{sections} // [] };
 
-        if (Plugins::YouTubeMusic::API->accountId($client) && $params->{browseId}) {
-            unshift @items, {
-                name        => cstring($client, 'PLUGIN_YOUTUBEMUSIC_SUBSCRIBE'),
-                url         => \&_subscribe_menu,
-                passthrough => [{ channelId => $params->{browseId} }],
-                type        => 'link',
-            };
-        }
-
         $callback->({ items => \@items });
     }, $client);
 }
@@ -1032,7 +1023,7 @@ sub _items_to_menu {
                 on_select => 'play',
                 $playall ? ( playall => 1 ) : (),
             );
-            my @actions = _track_actions($client, $item->{videoId});
+            my @actions = _track_actions($client, $item);
             if ($opts->{playlistId} && $item->{setVideoId}) {
                 push @actions, {
                     name        => cstring($client, 'PLUGIN_YOUTUBEMUSIC_REMOVE_TRACK'),
@@ -1074,18 +1065,28 @@ sub _items_to_menu {
             };
         }
         elsif ($type eq 'artist' && $item->{browseId}) {
+            my @artist_items;
+            if (Plugins::YouTubeMusic::API->accountId($client)) {
+                @artist_items = ({
+                    name        => cstring($client, 'PLUGIN_YOUTUBEMUSIC_SUBSCRIBE'),
+                    url         => \&_subscribe_menu,
+                    passthrough => [{ channelId => $item->{browseId} }],
+                    type        => 'link',
+                });
+            }
             push @menu, {
                 name        => $item->{name}   || 'Unknown Artist',
                 image       => $item->{thumbnail} || '',
                 $item->{thumbnail} ? () : (icon => $fallback_icon{artist}),
                 url         => \&_artist_menu,
                 passthrough => [{ browseId => $item->{browseId} }],
+                @artist_items ? (items => \@artist_items) : (),
             };
         }
         elsif ($type eq 'playlist' && $item->{browseId}) {
             push @menu, {
                 name        => $item->{title}  || 'Unknown Playlist',
-                line2       => $item->{count}  || '',
+                line2       => $item->{author} || $item->{count} || '',
                 image       => $item->{thumbnail} || '',
                 $item->{thumbnail} ? () : (icon => $fallback_icon{playlist}),
                 url         => \&_playlist_menu,
@@ -1130,7 +1131,7 @@ sub _items_to_menu {
                 on_select => 'play',
                 $playall ? ( playall => 1 ) : (),
             );
-            my @actions = _track_actions($client, $item->{videoId});
+            my @actions = _track_actions($client, $item);
             $song{items} = \@actions if @actions;
             push @menu, \%song;
         }
@@ -1169,22 +1170,46 @@ sub trackInfoMenu {
 }
 
 sub _track_actions {
-    my ($client, $video_id) = @_;
-    return () unless $video_id && Plugins::YouTubeMusic::API->accountId($client);
-    return (
-        {
+    my ($client, $item) = @_;
+    my $video_id = ref $item eq 'HASH' ? ($item->{videoId} || '') : ($item || '');
+    $item = { videoId => $video_id } unless ref $item eq 'HASH';
+    my @actions;
+    if ($video_id && Plugins::YouTubeMusic::API->accountId($client)) {
+        push @actions, {
             name        => cstring($client, 'PLUGIN_YOUTUBEMUSIC_LIKE'),
             url         => \&_like_menu,
             passthrough => [{ videoId => $video_id }],
             type        => 'link',
-        },
-        {
+        }, {
             name        => cstring($client, 'PLUGIN_YOUTUBEMUSIC_ADD_TO_PLAYLIST'),
             url         => \&_playlist_picker,
             passthrough => [{ videoId => $video_id }],
             type        => 'link',
-        },
-    );
+        };
+    }
+    if ($item->{artistBrowseId}) {
+        push @actions, {
+            name        => $item->{artist} || cstring($client, 'PLUGIN_YOUTUBEMUSIC_ARTIST'),
+            url         => \&_artist_menu,
+            passthrough => [{ browseId => $item->{artistBrowseId} }],
+            type        => 'link',
+        };
+    } elsif ($item->{artist}) {
+        push @actions, { name => $item->{artist}, type => 'text' };
+    }
+    if ($item->{albumBrowseId}) {
+        push @actions, {
+            name        => $item->{album} || 'Album',
+            url         => \&_playlist_menu,
+            passthrough => [{
+                browseId    => $item->{albumBrowseId},
+                browse_type => 'album',
+                album_title => $item->{album} || '',
+            }],
+            type        => 'link',
+        };
+    }
+    return @actions;
 }
 
 sub _library_actions {
