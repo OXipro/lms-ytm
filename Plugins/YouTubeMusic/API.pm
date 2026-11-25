@@ -53,7 +53,10 @@ sub streamQuery {
     $fmt = $prefs->get('codec') || 'auto' if !$fmt || $fmt eq 'auto';
     push @parts, 'codec=' . uri_escape_utf8($fmt) if $fmt && $fmt ne 'auto';
     push @parts, 'bitrate=' . uri_escape_utf8($bitrate) if $bitrate;
-    return @parts ? '?' . join('&', @parts) : '';
+    my $player_client = $prefs->get('player_client') || 'auto';
+    $player_client = 'auto' unless $player_client =~ /^(?:auto|tv|android|web|ios|mweb|web_embedded)$/;
+    push @parts, 'player=' . uri_escape_utf8($player_client);
+    return '?' . join('&', @parts);
 }
 
 sub _with_account {

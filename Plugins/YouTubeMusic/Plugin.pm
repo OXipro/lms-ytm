@@ -43,6 +43,7 @@ sub initPlugin {
         activeAccount          => '',
         shareCookiesWithYtdlp  => 0,
         codec                  => 'auto',
+        player_client          => 'auto',
         autoplay               => 1,
     });
     $class->_write_share_flag();

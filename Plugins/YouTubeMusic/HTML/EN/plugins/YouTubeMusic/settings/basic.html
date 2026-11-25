@@ -150,6 +150,17 @@
     }
     </script>
   [% END %]
+  [% WRAPPER setting title="PLUGIN_YOUTUBEMUSIC_PLAYER_CLIENT" desc="PLUGIN_YOUTUBEMUSIC_PLAYER_CLIENT_DESC" %]
+    <select name="pref_player_client" id="pref_player_client">
+      <option value="auto" [% IF pref_player_client == 'auto' || !pref_player_client %]selected[% END %]>Auto (Android, Web, iOS, TV)</option>
+      <option value="tv" [% IF pref_player_client == 'tv' %]selected[% END %]>TV</option>
+      <option value="android" [% IF pref_player_client == 'android' %]selected[% END %]>Android</option>
+      <option value="web" [% IF pref_player_client == 'web' %]selected[% END %]>Web</option>
+      <option value="ios" [% IF pref_player_client == 'ios' %]selected[% END %]>iOS</option>
+      <option value="mweb" [% IF pref_player_client == 'mweb' %]selected[% END %]>Mobile web</option>
+      <option value="web_embedded" [% IF pref_player_client == 'web_embedded' %]selected[% END %]>Embedded web</option>
+    </select>
+  [% END %]
   [% WRAPPER setting title="Audio Codec" desc="Select the audio codec for streaming. MP3 is compatible with all players. FLAC is lossless but requires more CPU. AAC is used as a fallback on some systems. Auto selects the best available codec automatically." %]
     <select name="pref_codec" id="pref_codec">
       <option value="auto" [% IF pref_codec == 'auto' %]selected[% END %]>Auto (recommended)</option>

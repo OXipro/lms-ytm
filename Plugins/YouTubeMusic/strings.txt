@@ -216,3 +216,9 @@ PLUGIN_YOUTUBEMUSIC_ADD_TO_QUEUE
 
 PLUGIN_YOUTUBEMUSIC_ARTIST
 	EN	Artist
+
+PLUGIN_YOUTUBEMUSIC_PLAYER_CLIENT
+	EN	YouTube client
+
+PLUGIN_YOUTUBEMUSIC_PLAYER_CLIENT_DESC
+	EN	How yt-dlp asks YouTube for the audio. Auto tries Android, the website, iOS, then TV, and falls back to a combined stream when YouTube offers no separate audio. Pick one client if a track never starts. Changing this does not require a new login.

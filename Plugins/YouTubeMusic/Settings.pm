@@ -21,7 +21,7 @@ sub name { 'PLUGIN_YOUTUBEMUSIC' }
 
 sub page { 'plugins/YouTubeMusic/settings/basic.html' }
 
-sub prefs { return ($prefs, qw(proxy_port autoplay codec path_python path_ytdlp path_ffmpeg path_node log_path disable_node_worker)) }
+sub prefs { return ($prefs, qw(proxy_port autoplay codec player_client path_python path_ytdlp path_ffmpeg path_node log_path disable_node_worker)) }
 
 sub _proxy_json {
     my ($method, $path, $payload) = @_;
@@ -54,6 +54,9 @@ sub handler {
         my $codec = $params->{pref_codec} || $params->{codec} || 'auto';
         $codec = 'auto' unless grep { $_ eq $codec } qw(auto mp3 flac aac);
         $prefs->set('codec', $codec);
+        my $player_client = $params->{pref_player_client} || 'auto';
+        $player_client = 'auto' unless grep { $_ eq $player_client } qw(auto tv android web ios mweb web_embedded);
+        $prefs->set('player_client', $player_client);
         # Save playlists — collect all name/browseId pairs
         my @playlists;
         my $names = $params->{playlist_name};
@@ -141,6 +144,8 @@ sub handler {
     $params->{pref_autoplay} = $params->{autoplay};
     $params->{codec} = $prefs->get('codec') || 'auto';
     $params->{pref_codec} = $params->{codec};
+    $params->{player_client} = $prefs->get('player_client') || 'auto';
+    $params->{pref_player_client} = $params->{player_client};
 
     $params->{path_python} = $prefs->get('path_python') || '';
     $params->{path_ytdlp}  = $prefs->get('path_ytdlp')  || '';

@@ -905,36 +905,52 @@ def _cleanup_old_prefetch(max_age=600):
     except Exception:
         logging.exception("Prefetch cleanup error")
 
-def _prefetch_worker(video_id, codec=None, bitrate=None, cookiefile=None, tag="default"):
+def _prefetch_worker(video_id, codec=None, bitrate=None, cookiefile=None, tag="default", player=None):
     tmp_path, done_path = _prefetch_paths(video_id, tag, codec)
+    key = f"{video_id}|{tag}"
     with _prefetch_semaphore:
         t0 = time.time()
-        logging.warning("PREFETCH_TIMING %s started", video_id)
+        written = 0
         try:
-            logged_first = False
-            logged_128k = False
             with open(tmp_path, "wb") as f:
-                for chunk in stream_audio(video_id, codec, bitrate, cookiefile):
-                    if not logged_first:
-                        logging.warning("PREFETCH_TIMING %s first byte after %.2fs", video_id, time.time()-t0)
-                        logged_first = True
+                for chunk in stream_audio(video_id, codec, bitrate, cookiefile, player):
+                    written += len(chunk)
                     f.write(chunk)
                     f.flush()
-                    if not logged_128k and os.path.getsize(tmp_path) >= 131072:
-                        logging.warning("PREFETCH_TIMING %s 128KB after %.2fs", video_id, time.time()-t0)
-                        logged_128k = True
+            if written < 1024:
+                raise RuntimeError(_stream_errors.get(video_id) or "no audio")
             os.replace(tmp_path, done_path)
-            logging.warning("PREFETCH_TIMING %s complete after %.2fs", video_id, time.time()-t0)
-        except Exception:
-            logging.exception("Prefetch failed for %s", video_id)
+            _prefetch_failed.pop(key, None)
+            elapsed = time.time() - t0
+            if elapsed > 8:
+                logging.warning("Prefetch %s ready after %.1fs (%d bytes)", video_id, elapsed, written)
+        except Exception as exc:
+            logging.warning("Prefetch failed for %s: %s", video_id, exc)
+            _prefetch_failed[key] = str(exc)[:400]
             try:
                 os.remove(tmp_path)
             except OSError:
                 pass
         finally:
             with _prefetch_lock:
-                _prefetch_started.discard(f"{video_id}|{tag}")
-def start_prefetch(video_id, codec=None, bitrate=None, cookiefile=None, tag="default"):
+                _prefetch_started.discard(key)
+
+def _prefetch_bytes(video_id, tag, codec):
+    done = get_prefetched_path(video_id, tag, codec)
+    if done:
+        try:
+            return os.path.getsize(done)
+        except OSError:
+            return 0
+    tmp_path, _done = _prefetch_paths(video_id, tag, codec)
+    if os.path.exists(tmp_path):
+        try:
+            return os.path.getsize(tmp_path)
+        except OSError:
+            return 0
+    return 0
+
+def start_prefetch(video_id, codec=None, bitrate=None, cookiefile=None, tag="default", player=None):
     key = f"{video_id}|{tag}"
     _, done_path = _prefetch_paths(video_id, tag, codec)
     if os.path.exists(done_path):
@@ -945,10 +961,11 @@ def start_prefetch(video_id, codec=None, bitrate=None, cookiefile=None, tag="def
             return "in_progress"
         _prefetch_started.add(key)
 
+    _prefetch_failed.pop(key, None)
     _cleanup_old_prefetch()
     t = threading.Thread(
         target=_prefetch_worker,
-        args=(video_id, codec, bitrate, cookiefile, tag),
+        args=(video_id, codec, bitrate, cookiefile, tag, player),
         daemon=True,
     )
     t.start()
@@ -992,7 +1009,7 @@ def _serve_complete(handler, path, mime):
 
 def _serve_growing(handler, vid, tmp_path, done_path, mime):
     try:
-        deadline = time.time() + 25
+        deadline = time.time() + 8
         while time.time() < deadline:
             if os.path.exists(done_path) and os.path.getsize(done_path) > 0:
                 return _serve_complete(handler, done_path, mime)
@@ -1528,7 +1545,9 @@ _STREAM_FORMAT = (
     "bestaudio[ext=webm][acodec=opus]/"
     "bestaudio[ext=webm]/"
     "bestaudio[protocol^=m3u8]/"
-    "bestaudio"
+    "bestaudio/"
+    "best[acodec!=none][protocol^=https]/"
+    "best[acodec!=none]"
 )
 _audio_url_cache = {}
 _AUDIO_URL_TTL = 2 * 60 * 60
@@ -1720,132 +1739,84 @@ def _safe_bitrate(value):
     return value if value in ("128", "192", "256", "320") else "192"
 
 
-def stream_audio(video_id, codec=None, bitrate=None, cookiefile=None):
-    _ensure_bin_in_path()
-    audio_codec, audio_format, _audio_mime = _resolve_codec(codec)
-    audio_bitrate = _safe_bitrate(bitrate)
-    ytdlp = _find_ytdlp()
-    if not ytdlp:
-        raise RuntimeError("yt-dlp not found in PATH")
+_PLAYER_ORDER = ("android", "web", "ios", "tv")
+_PLAYER_CHOICES = ("auto",) + _PLAYER_ORDER + ("mweb", "web_embedded")
+_auto_player = {"name": ""}
+_stream_errors = {}
+_prefetch_failed = {}
 
-    url = f"https://music.youtube.com/watch?v={video_id}"
 
-    def _ffmpeg_out(cmd):
-        cmd += [
-            "-vn",
-            "-map_metadata", "-1",
-            "-id3v2_version", "0",
-            "-write_id3v1", "0",
-            "-muxdelay", "0",
-            "-muxpreload", "0",
-            "-flush_packets", "1",
-            "-f", audio_format,
-            "-codec:a", audio_codec,
-        ]
-        if audio_codec not in ("flac", "pcm_s16le"):
-            cmd += ["-b:a", f"{audio_bitrate}k"]
-        if audio_format == "mp3":
-            cmd += ["-write_xing", "0"]
-        if audio_codec == "flac":
-            cmd += ["-sample_fmt", "s16"]
-        cmd.append("pipe:1")
-        return cmd
+def _player_sequence(name):
+    name = (name or "auto").strip().lower()
+    if name not in _PLAYER_CHOICES:
+        name = "auto"
+    if name != "auto":
+        return name, [name]
+    winner = _auto_player.get("name") or ""
+    order = list(_PLAYER_ORDER)
+    if winner in order:
+        order.remove(winner)
+        order.insert(0, winner)
+    return "auto", order
 
-    ffmpeg_cmd = _ffmpeg_out([
-        _find_ffmpeg(),
-        "-nostdin",
-        "-loglevel", "error",
+
+def _drain_pipe(pipe, bucket):
+    try:
+        bucket.append(pipe.read())
+    except Exception:
+        pass
+
+
+def _ffmpeg_encode_cmd(audio_codec, audio_format, audio_bitrate):
+    cmd = [
+        _find_ffmpeg(), "-nostdin", "-loglevel", "error",
         "-fflags", "+nobuffer+discardcorrupt+genpts",
-        "-probesize", "32768",
-        "-analyzeduration", "0",
+        "-probesize", "32768", "-analyzeduration", "0",
         "-i", "pipe:0",
-    ])
+        "-vn", "-map_metadata", "-1",
+        "-id3v2_version", "0", "-write_id3v1", "0",
+        "-muxdelay", "0", "-muxpreload", "0", "-flush_packets", "1",
+        "-f", audio_format, "-codec:a", audio_codec,
+    ]
+    if audio_codec not in ("flac", "pcm_s16le"):
+        cmd += ["-b:a", f"{audio_bitrate}k"]
+    if audio_format == "mp3":
+        cmd += ["-write_xing", "0"]
+    if audio_codec == "flac":
+        cmd += ["-sample_fmt", "s16"]
+    cmd.append("pipe:1")
+    return cmd
 
-    # Try persistent YDL first (faster — no subprocess startup)
-    import time as _time
-    _t0 = _time.monotonic()
-    audio_url = None if cookiefile else _cached_audio_url(video_id)
-    _t1 = _time.monotonic()
-    _log_fn = logging.warning if audio_url else (logging.info if _ydl_available is False else logging.warning)
-    _log_fn("PREFETCH_YDL videoId=%s extraction=%.2fs url=%s", video_id, _t1-_t0, "OK" if audio_url else "FAIL")
-    # Use already-resolved CDN URL for subprocess fallback — avoids second YouTube extraction
-    ytdlp_url = audio_url or url
-    _NODE_PATH = _find_node()
-    ytdlp_cmd = [
-        ytdlp,
-        "--no-playlist",
-        "--quiet",
-        "--no-warnings",
-        "--no-check-certificates",
-        "--socket-timeout", "10",
-        "--retries", "2",
-        "--extractor-retries", "2",
-        "--no-part",
+
+def _stream_one(video_id, ytdlp, audio_codec, audio_format, audio_bitrate, cookiefile, player_client):
+    node = _find_node()
+    cmd = [
+        ytdlp, "--no-playlist", "--quiet", "--no-warnings",
+        "--no-check-certificates", "--socket-timeout", "8",
+        "--retries", "0", "--extractor-retries", "0", "--no-part",
         "--http-chunk-size", "1M",
         "-f", _STREAM_FORMAT,
-        *(["--js-runtimes", f"node:{_NODE_PATH}"] if _NODE_PATH else ["--js-runtimes", "node"]),
-        "--extractor-args", "youtube:player_client=web_embedded",
+        *(["--js-runtimes", f"node:{node}"] if node else ["--js-runtimes", "node"]),
+        "--extractor-args", f"youtube:player_client={player_client}",
         "--cache-dir", os.path.join(BIN_DIR, "ytdlp_cache"),
-        "--add-header", "User-Agent:com.google.android.youtube/17.29.34",
         "-o", "-",
+        f"https://music.youtube.com/watch?v={video_id}",
     ]
     if cookiefile:
-        ytdlp_cmd += ["--cookies", cookiefile]
-    ytdlp_cmd.append(ytdlp_url)
-    # Only use direct ffmpeg URL approach on non-ARM platforms
-    # On ARM (Pi), YouTube's CDN silently times out ffmpeg connections
-    if audio_url:
-        ffmpeg_url_cmd = _ffmpeg_out([
-            _find_ffmpeg(), "-nostdin", "-loglevel", "error",
-            "-fflags", "+nobuffer+discardcorrupt+genpts",
-            "-flags", "low_delay",
-            "-probesize", "32768",
-            "-analyzeduration", "0",
-            "-user_agent", "Mozilla/5.0 (Linux; Android 6.0; Nexus 5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Mobile Safari/537.36",
-            "-headers", "Accept: */*\r\nAccept-Language: en-us,en;q=0.5\r\n",
-            "-i", audio_url,
-        ])
-        ffmpeg_proc = subprocess.Popen(ffmpeg_url_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        bytes_sent = 0
-        try:
-            while True:
-                chunk = ffmpeg_proc.stdout.read(65536)
-                if not chunk:
-                    break
-                bytes_sent += len(chunk)
-                yield chunk
-        finally:
-            ffmpeg_proc.stdout.close()
-            stderr_out = ffmpeg_proc.stderr.read().decode("utf-8", errors="replace").strip()
-            ffmpeg_proc.wait()
-            if stderr_out and bytes_sent == 0:
-                logging.warning("ffmpeg URL stderr: %s", stderr_out[:500])
-        if bytes_sent > 0:
-            return
-        _drop_audio_url(video_id)
-        ytdlp_cmd[-1] = url
-        # Fallback: subprocess yt-dlp
-        logging.warning("ffmpeg URL produced 0 bytes for %s, falling back to subprocess", video_id)
-    if _ydl_available is not False:
-        logging.warning("Persistent YDL failed for %s, falling back to subprocess", video_id)
-    else:
-        logging.info("Persistent YDL not available for %s, using subprocess", video_id)
-    logging.info("Streaming videoId=%s", video_id)
-
-    ytdlp_proc = subprocess.Popen(
-        ytdlp_cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
-    )
+        cmd.insert(-1, "--cookies")
+        cmd.insert(-1, cookiefile)
+    ytdlp_proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     ffmpeg_proc = subprocess.Popen(
-        ffmpeg_cmd,
-        stdin=ytdlp_proc.stdout,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
+        _ffmpeg_encode_cmd(audio_codec, audio_format, audio_bitrate),
+        stdin=ytdlp_proc.stdout, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
     )
     ytdlp_proc.stdout.close()
-
+    yerr, ferr = [], []
+    threading.Thread(target=_drain_pipe, args=(ytdlp_proc.stderr, yerr), daemon=True).start()
+    threading.Thread(target=_drain_pipe, args=(ffmpeg_proc.stderr, ferr), daemon=True).start()
     try:
         while True:
-            chunk = ffmpeg_proc.stdout.read(65536)
+            chunk = ffmpeg_proc.stdout.read(32768)
             if not chunk:
                 break
             yield chunk
@@ -1853,26 +1824,71 @@ def stream_audio(video_id, codec=None, bitrate=None, cookiefile=None):
         for proc in (ffmpeg_proc, ytdlp_proc):
             try:
                 proc.terminate()
+            except Exception:
+                pass
+        for proc in (ffmpeg_proc, ytdlp_proc):
+            try:
                 proc.wait(timeout=2)
             except Exception:
                 try:
                     proc.kill()
                 except Exception:
                     pass
+        ytext = (yerr[0] if yerr else b"").decode("utf-8", "replace").strip()
+        ftext = (ferr[0] if ferr else b"").decode("utf-8", "replace").strip()
+        if ytext:
+            logging.warning("yt-dlp %s %s: %s", player_client, video_id, ytext[:400])
+        if ftext:
+            logging.warning("ffmpeg %s %s: %s", player_client, video_id, ftext[:400])
 
 
+def stream_audio(video_id, codec=None, bitrate=None, cookiefile=None, player=None):
+    _ensure_bin_in_path()
+    audio_codec, audio_format, _audio_mime = _resolve_codec(codec)
+    audio_bitrate = _safe_bitrate(bitrate)
+    ytdlp = _find_ytdlp()
+    if not ytdlp:
+        raise RuntimeError("yt-dlp not found in PATH")
+
+    mode, clients = _player_sequence(player)
+    notes = []
+    for client_name in clients:
+        written = 0
+        try:
+            for chunk in _stream_one(
+                video_id, ytdlp, audio_codec, audio_format, audio_bitrate, cookiefile, client_name,
+            ):
+                written += len(chunk)
+                yield chunk
+        except Exception as exc:
+            notes.append(f"{client_name}: {exc}")
+            logging.warning("Stream %s via %s failed: %s", video_id, client_name, exc)
+            continue
+        if written > 0:
+            if mode == "auto":
+                _auto_player["name"] = client_name
+            _stream_errors.pop(video_id, None)
+            logging.warning("Audio %s via %s (%d bytes)", video_id, client_name, written)
+            return
+        notes.append(f"{client_name}: no audio")
+    message = "; ".join(notes)[:500] or "no audio"
+    _stream_errors[video_id] = message
+    logging.warning("No audio for %s player=%s: %s", video_id, mode, message)
 def _playback_from_qs(p):
     codec = p("codec") or None
     bitrate = p("bitrate") or None
     account = p("account") or ""
+    player = (p("player") or "auto").strip().lower()
+    if player not in _PLAYER_CHOICES:
+        player = "auto"
     cookiefile = None
     try:
         import ytm_accounts
         cookiefile = ytm_accounts.cookie_file(account)
     except Exception:
         logging.exception("Cookie lookup failed")
-    tag = f"{codec or 'auto'}-{bitrate or 'def'}-{'c' if cookiefile else 'n'}-{account or 'anon'}"
-    return codec, bitrate, account, cookiefile, tag
+    tag = f"{codec or 'auto'}-{bitrate or 'def'}-{'c' if cookiefile else 'n'}-{account or 'anon'}-{player}"
+    return codec, bitrate, account, cookiefile, tag, player
 
 
 def _account_error(account):
@@ -2363,7 +2379,7 @@ class _Handler(BaseHTTPRequestHandler):
                 vid = path[len("/stream/"):]
                 if not vid:
                     return self._error("Missing videoId", 400)
-                codec, bitrate, _account, cookiefile, tag = _playback_from_qs(p)
+                codec, bitrate, _account, cookiefile, tag, player = _playback_from_qs(p)
                 _codec_name, _fmt, mime = _resolve_codec(codec)
 
                 cached_path = get_prefetched_path(vid, tag, codec)
@@ -2373,7 +2389,7 @@ class _Handler(BaseHTTPRequestHandler):
 
                 tmp_path, done_path = _prefetch_paths(vid, tag, codec)
                 if not get_prefetched_path(vid, tag, codec):
-                    start_prefetch(vid, codec, bitrate, cookiefile, tag)
+                    start_prefetch(vid, codec, bitrate, cookiefile, tag, player)
                 if _serve_growing(self, vid, tmp_path, done_path, mime):
                     return
                 logging.warning("Stream %s produced no audio", vid)
@@ -2386,9 +2402,20 @@ class _Handler(BaseHTTPRequestHandler):
                 vid = path[len("/prefetch/"):]
                 if not vid:
                     return self._error("Missing videoId", 400)
-                codec, bitrate, _account, cookiefile, tag = _playback_from_qs(p)
-                status = start_prefetch(vid, codec, bitrate, cookiefile, tag)
-                self._send_json({"videoId": vid, "status": status})
+                codec, bitrate, _account, cookiefile, tag, player = _playback_from_qs(p)
+                status = start_prefetch(vid, codec, bitrate, cookiefile, tag, player)
+                key = f"{vid}|{tag}"
+                nbytes = _prefetch_bytes(vid, tag, codec)
+                failed = _prefetch_failed.get(key)
+                if failed and status not in ("in_progress", "started") and nbytes <= 0:
+                    status = "failed"
+                self._send_json({
+                    "videoId": vid,
+                    "status": status,
+                    "bytes": nbytes,
+                    "player": _auto_player.get("name") or player,
+                    "error": failed or _stream_errors.get(vid) or "",
+                })
 
             else:
                 self._error(f"Unknown endpoint: {path}", 404)
