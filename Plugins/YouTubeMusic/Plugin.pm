@@ -587,13 +587,12 @@ sub _top_level {
             );
         }
 
-        push @items, _menu_row($client, cstring($client, 'PLUGIN_YOUTUBEMUSIC_SEARCH'), \&_search_dispatch, '/html/images/search.png', type => 'search');
+        push @items, _menu_row($client, cstring($client, 'PLUGIN_YOUTUBEMUSIC_SEARCH'), \&_search_menu, '/html/images/search.png');
         if ($activeId) {
             push @items, (
                 _menu_row($client, cstring($client, 'PLUGIN_YOUTUBEMUSIC_HOME'), \&_home_menu, 'plugins/YouTubeMusic/html/images/featured_MTL_icon_home.png'),
                 _menu_row($client, cstring($client, 'PLUGIN_YOUTUBEMUSIC_LIBRARY'), \&_library_menu, '/html/images/musicfolder.png'),
                 _menu_row($client, cstring($client, 'PLUGIN_YOUTUBEMUSIC_HISTORY'), \&_history_menu, '/html/images/years.png'),
-                _menu_row($client, cstring($client, 'PLUGIN_YOUTUBEMUSIC_RECENT_SEARCHES'), \&_search_history, '/html/images/search.png'),
             );
         }
         push @items, (
@@ -765,9 +764,10 @@ sub _search_dispatch {
     my ($client, $callback, $args, $pt) = @_;
 
     my $query = ($pt && $pt->{query}) || ($args->{search} // '');
+    $query =~ s/^\s+|\s+$//g;
 
     unless ($query) {
-        return _search_history($client, $callback);
+        return _search_menu($client, $callback);
     }
 
     my @type_menus = map {
@@ -1522,14 +1522,22 @@ sub _save_queue {
     }, $client);
 }
 
-sub _search_history {
+sub _search_menu {
     my ($client, $cb) = @_;
+    my @items = (
+        _menu_row(
+            $client,
+            cstring($client, 'PLUGIN_YOUTUBEMUSIC_NEW_SEARCH'),
+            \&_search_dispatch,
+            '/html/images/search.png',
+            type => 'search',
+        ),
+    );
     unless (Plugins::YouTubeMusic::API->accountId($client)) {
-        return $cb->({ items => [] });
+        return $cb->({ items => \@items });
     }
     Plugins::YouTubeMusic::API->searchSuggestions('', sub {
         my $rows = shift;
-        my @items;
         if (ref $rows eq 'ARRAY') {
             for my $row (@{$rows}) {
                 next unless ref $row eq 'HASH' && $row->{text} && $row->{fromHistory};
