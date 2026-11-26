@@ -12,6 +12,7 @@ use Scalar::Util   qw(blessed);
 use URI::Escape    qw(uri_unescape uri_escape_utf8);
 
 use JSON::XS       qw(decode_json);
+use Slim::Utils::Alarm;
 use Slim::Utils::Log;
 use Slim::Menu::GlobalSearch;
 use Slim::Utils::Prefs;
@@ -32,6 +33,9 @@ my $log   = Slim::Utils::Log->addLogCategory({
 });
 
 my $PROXY_PID;
+my $ALARM_BUSY = 0;
+my $ALARM_TRIES = 0;
+my $ALARM_AT = 0;
 
 sub initPlugin {
     my $class = shift;
@@ -104,8 +108,10 @@ sub initPlugin {
 
 sub shutdownPlugin {
     my $class = shift;
+    Slim::Utils::Timers::killTimers(__PACKAGE__, \&_refresh_alarm_playlists);
     Slim::Control::Request::unsubscribe(\&_on_playlist_stop);
     Slim::Control::Request::unsubscribe(\&_on_newsong);
+    Slim::Control::Request::unsubscribe(\&_refresh_alarm_playlists);
     if ($PROXY_PID) {
         $log->info("Stopping YouTube Music proxy (PID $PROXY_PID)");
         if ($^O eq 'MSWin32') {
@@ -439,6 +445,11 @@ sub postinitPlugin {
         \&_on_newsong,
         [['playlist'], ['newsong']]
     );
+    Slim::Control::Request::subscribe(
+        \&_refresh_alarm_playlists,
+        [['alarm'], ['playlists']]
+    );
+    _schedule_alarm_playlists(8);
 }
 
 
@@ -676,6 +687,7 @@ sub _switch_account {
         $feed->{title} = cstring($client, 'PLUGIN_YOUTUBEMUSIC');
         $callback->($feed);
     });
+    _refresh_alarm_playlists($client);
 }
 
 sub _library_menu {
@@ -1568,6 +1580,117 @@ sub _forget_search {
     Plugins::YouTubeMusic::API->forgetSearch($pt->{feedbackToken}, sub {
         _action_done($client, $cb, shift, 'PLUGIN_YOUTUBEMUSIC_REMOVED');
     }, $client);
+}
+
+sub _schedule_alarm_playlists {
+    my $delay = shift || 15;
+    Slim::Utils::Timers::setTimer(__PACKAGE__, Time::HiRes::time() + $delay, \&_refresh_alarm_playlists);
+}
+
+sub _alarm_account {
+    my $hint = shift;
+    my $client;
+    if (blessed($hint) && $hint->can('client')) {
+        $client = $hint->client;
+    } elsif (blessed($hint) && $hint->isa('Slim::Player::Client')) {
+        $client = $hint;
+    }
+    if ($client) {
+        my $id = Plugins::YouTubeMusic::API->accountId($client);
+        return $id if $id;
+    }
+    my $server = $prefs->get('activeAccount') || '';
+    return '' if !$server || $server eq '-';
+    return $server;
+}
+
+sub _system_playlist {
+    my ($shelf, $title) = @_;
+    my $text = join(' ', grep { defined && length } $shelf, $title);
+    return $text =~ /recap|replay|r[eé]cap|\bmix\b|discover|d[eé]couvert|radio|daily|supermix|listen again|quick pick|for you|pour vous/i;
+}
+
+sub _alarm_items {
+    my ($library, $home) = @_;
+    my @items = (
+        { title => '{PLUGIN_YOUTUBEMUSIC_FEED}', url => 'ytmplaylist://feed' },
+    );
+    my %seen = (
+        'ytmplaylist://feed' => 1,
+    );
+    my $recap = 0;
+    my @system;
+    my $push = sub {
+        my ($title, $url, $bucket) = @_;
+        return if !$title || !$url || $seen{$url}++;
+        push @{$bucket}, { title => $title, url => $url };
+    };
+    if (ref $home eq 'ARRAY') {
+        for my $section (@{$home}) {
+            next unless ref $section eq 'HASH';
+            my $shelf = $section->{title} || '';
+            for my $item (@{ $section->{items} || [] }) {
+                next unless ref $item eq 'HASH' && ($item->{type} || '') eq 'playlist' && $item->{browseId};
+                my $title = $item->{title} || $shelf;
+                my $text = "$shelf $title";
+                if ($text =~ /recap|replay|r[eé]cap/i) {
+                    $recap = 1;
+                    next;
+                }
+                next unless _system_playlist($shelf, $title);
+                $push->($title, "ytmplaylist://$item->{browseId}", \@system);
+            }
+        }
+    }
+    if (ref $library eq 'ARRAY') {
+        for my $pl (@{$library}) {
+            next unless ref $pl eq 'HASH';
+            if (($pl->{title} || '') =~ /recap|replay|r[eé]cap/i) {
+                $recap = 1;
+            }
+        }
+    }
+    if ($recap && !$seen{'ytmplaylist://recap'}++) {
+        splice @items, 1, 0, { title => '{PLUGIN_YOUTUBEMUSIC_RECAP}', url => 'ytmplaylist://recap' };
+    }
+    push @items, @system;
+    if (ref $library eq 'ARRAY') {
+        for my $pl (@{$library}) {
+            next unless ref $pl eq 'HASH' && $pl->{browseId};
+            $push->($pl->{title} || 'Playlist', "ytmplaylist://$pl->{browseId}", \@items);
+        }
+    }
+    return \@items;
+}
+
+sub _refresh_alarm_playlists {
+    my $hint = shift;
+    return if $ALARM_BUSY;
+    my $force = blessed($hint) && $hint->isa('Slim::Player::Client');
+    return if !$force && $ALARM_AT && (Time::HiRes::time() - $ALARM_AT) < 180;
+    Slim::Utils::Timers::killTimers(__PACKAGE__, \&_refresh_alarm_playlists);
+    my $account = _alarm_account($hint);
+    unless ($account) {
+        _schedule_alarm_playlists(20) if ++$ALARM_TRIES <= 5;
+        return;
+    }
+    $ALARM_BUSY = 1;
+    Plugins::YouTubeMusic::API->accountGet('/library/playlists', $account, sub {
+        my $library = shift;
+        Plugins::YouTubeMusic::API->accountGet('/browse/home', $account, sub {
+            my $home = shift;
+            $ALARM_BUSY = 0;
+            if (!defined $library && !defined $home) {
+                _schedule_alarm_playlists(15) if ++$ALARM_TRIES <= 5;
+                return;
+            }
+            $ALARM_TRIES = 0;
+            $ALARM_AT = Time::HiRes::time();
+            my $items = _alarm_items($library, $home);
+            Slim::Utils::Alarm->addPlaylists('PLUGIN_YOUTUBEMUSIC', $items) if @{$items};
+            $log->info('Registered ' . scalar(@{$items}) . ' YouTube Music alarm playlists');
+        });
+    });
 }
 
 1;

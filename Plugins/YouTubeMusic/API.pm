@@ -165,6 +165,15 @@ sub library {
     _get(_with_account("/library/$kind", $client), $cb);
 }
 
+sub accountGet {
+    my ($class, $path, $account, $cb) = @_;
+    if ($account) {
+        my $qs = 'account=' . uri_escape_utf8($account);
+        $path .= ($path =~ /\?/ ? '&' : '?') . $qs;
+    }
+    _get($path, $cb);
+}
+
 sub liked {
     my ($class, $cb, $client) = @_;
     _get(_with_account('/library/liked', $client), $cb);
